@@ -1,9 +1,8 @@
 import * as presetOptimizations from '../preset/index.js';
 import { getRequestHeaders } from '@sillytavern/script';
 import { callGenericPopup, POPUP_TYPE } from '@sillytavern/scripts/popup';
-import { BAIBAOKU_FAST_CONFIG_URL, BAIBAOKU_PANEL_STATUS_CACHE_MS, BAIBAOKU_PRESET_AUTO_BACKUP_MIN_VERSION, BAIBAOKU_REQUIRED_BACKEND_VERSION, BAIBAOKU_STATUS_TIMEOUT_MS, BAIBAOKU_STATUS_URL, LOG_PREFIX, SAVE_GENERATE_FETCH_KEY } from './constants.js';
+import { BAIBAOKU_FAST_CONFIG_URL, BAIBAOKU_PANEL_STATUS_CACHE_MS, BAIBAOKU_PRESET_AUTO_BACKUP_MIN_VERSION, BAIBAOKU_REQUIRED_BACKEND_VERSION, BAIBAOKU_STATUS_TIMEOUT_MS, BAIBAOKU_STATUS_URL, LOG_PREFIX } from './constants.js';
 import { applyFastChatGetOptimization } from './fastChat.js';
-import { markSaveGenerateBackendAvailable } from './saveGenerate.js';
 import { extensionState, settings } from './state.js';
 import { getBaibaokuEarlyBridge } from './theme.js';
 import { isVersionGreater } from './updateCheck.js';
@@ -59,7 +58,8 @@ function applyBaibaokuPanelLocalState(container) {
         .prop('checked', false)
         .prop('disabled', true);
     container.find('#bai_bai_toolkit_save_generate_enabled')
-        .prop('checked', settings.saveGenerateEnabled === true);
+        .prop('checked', false)
+        .prop('disabled', true);
     presetAutoBackupToggle
         .prop('checked', settings.presetAutoBackupEnabled !== false);
     container.find('#bai_bai_toolkit_tokenizer_bulk_count_enabled')
@@ -224,7 +224,6 @@ async function refreshBaibaokuPanelStatus(container, { force = false } = {}) {
 
     try {
         const status = await fetchBaibaokuStatus();
-        markSaveGenerateBackendAvailable(globalThis[SAVE_GENERATE_FETCH_KEY], true, status);
         const driver = status?.driver;
         panelState.cache = {
             ...(panelState.cache || {}),
@@ -315,7 +314,6 @@ async function refreshBaibaokuPanelStatus(container, { force = false } = {}) {
             console.debug(`${LOG_PREFIX} Failed to read BaiBaoKu fast config`, error);
         }
     } catch {
-        markSaveGenerateBackendAvailable(globalThis[SAVE_GENERATE_FETCH_KEY], false);
         updateBaibaokuStatusText(serverStatus, '未安装', false);
         updateBaibaokuStatusText(driverStatus, '未知', false);
         applyPresetAutoBackupToggleAvailability(container, null);

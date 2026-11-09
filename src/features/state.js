@@ -1,6 +1,6 @@
 import { saveSettingsDebounced } from '@sillytavern/script';
 import { extension_settings } from '@sillytavern/scripts/extensions';
-import { EXTENSION_KEY, SAVE_GENERATE_DEFAULT_ENABLED_MIGRATION_KEY, SETTINGS_KEY } from './constants.js';
+import { EXTENSION_KEY, SETTINGS_KEY } from './constants.js';
 const MODULE_NAME = getModuleName();
 const EXTENSION_ID = getExtensionId();
 const defaultSettings = {
@@ -19,7 +19,7 @@ const defaultSettings = {
     fastCharacterListEnabled: true,
     recentChatListAccelerationEnabled: true,
     progressiveChatLoadingEnabled: false,
-    saveGenerateEnabled: true,
+    saveGenerateEnabled: false,
     tokenizerBulkCountEnabled: true,
     chatKeyboardScanReductionEnabled: true,
     extensionManifestBundleEnabled: true,
@@ -122,7 +122,6 @@ function initializeSettings() {
     }
 
     let removedLegacySetting = false;
-    let migratedSaveGenerateDefault = false;
 
     if (
         typeof extension_settings[SETTINGS_KEY].baibaokuSettingsAccelerationEnabled !== 'boolean'
@@ -143,12 +142,10 @@ function initializeSettings() {
         }
     }
 
-    if (extension_settings[SETTINGS_KEY][SAVE_GENERATE_DEFAULT_ENABLED_MIGRATION_KEY] !== true) {
-        if (extension_settings[SETTINGS_KEY].saveGenerateEnabled === false) {
-            extension_settings[SETTINGS_KEY].saveGenerateEnabled = true;
-        }
-        extension_settings[SETTINGS_KEY][SAVE_GENERATE_DEFAULT_ENABLED_MIGRATION_KEY] = true;
-        migratedSaveGenerateDefault = true;
+    // Personal Stable never arms Save Generate, including previously enabled settings.
+    if (extension_settings[SETTINGS_KEY].saveGenerateEnabled !== false) {
+        extension_settings[SETTINGS_KEY].saveGenerateEnabled = false;
+        removedLegacySetting = true;
     }
 
     for (const [key, value] of Object.entries(defaultSettings)) {
@@ -158,13 +155,11 @@ function initializeSettings() {
     }
 
     Object.assign(settings, defaultSettings, extension_settings[SETTINGS_KEY]);
-    delete settings[SAVE_GENERATE_DEFAULT_ENABLED_MIGRATION_KEY];
     const normalizedPresetLinkedOptimizationSettings = normalizeLinkedPresetOptimizationSettings();
     const normalizedMessageEditClickSetting = normalizeMessageEditClickSettings();
 
     if (
         removedLegacySetting
-        || migratedSaveGenerateDefault
         || normalizedPresetLinkedOptimizationSettings
         || normalizedMessageEditClickSetting
     ) {

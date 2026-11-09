@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "test:preset-backup-retention": "node --experimental-vm-modules --test scripts/test-preset-backup-retention.mjs",
+    "test:personal-stable": "node --experimental-vm-modules --test scripts/test-personal-stable.mjs",
     "test:generate-retry": "node --experimental-vm-modules --test scripts/test-generate-blacklist-retry.mjs",
     "test:preset-search": "node --experimental-vm-modules --test scripts/test-preset-entry-search.mjs",
     "sync-version": "node scripts/sync-version.mjs",

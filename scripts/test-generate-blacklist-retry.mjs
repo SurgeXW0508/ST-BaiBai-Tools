@@ -1224,10 +1224,10 @@ test('backend capability is opt-in, cached, and cleared when querying an older b
     assert.equal(state.backendSupportsCompleteResponseTool, false);
 });
 
-// Reproduce page startup: the settings panel can finish its status fetch before
-// the generation hook's own status probe. Exercise the real panel, not its marker alone.
+// Personal Stable decouples the panel from Save Generate. The unassembled module
+// remains testable in isolation and must perform its own probe if explicitly invoked.
 for (const modernBackend of [true, false]) {
-    test(`panel-first status refresh preserves tool capability (modern=${modernBackend})`, async () => {
+    test(`personal panel does not arm Save Generate; isolated module probes independently (modern=${modernBackend})`, async () => {
         const h = await saveGenerateHarness({ install: true, modernBackend });
         const fetch = h.context.fetch;
         h.context.fetch = (url, init) => url === h.constants.BAIBAOKU_FAST_CONFIG_URL
@@ -1243,7 +1243,7 @@ for (const modernBackend of [true, false]) {
         const container = Object.fromEntries(['find', 'closest', 'prop', 'data', 'attr', 'toggleClass', 'css', 'text', 'each']
             .map(name => [name, function () { return this; }]));
         await panel.refreshBaibaokuPanelStatus(container);
-        assert.equal(h.saveState.backendAvailable, true);
+        assert.equal(h.saveState.backendAvailable, null);
         assert.equal(h.statusRequests.length, 1);
         const body = await prepareMainRequest(h);
         body.tools = h.body.tools;
@@ -1251,7 +1251,7 @@ for (const modernBackend of [true, false]) {
         assert.equal(h.requests[0].pathname, modernBackend
             ? h.constants.BAIBAOKU_SAVE_GENERATE_URL : h.constants.SAVE_GENERATE_PATH);
         assert.equal(h.saveState.backendSupportsCompleteResponseTool, modernBackend);
-        assert.equal(h.statusRequests.length, 1, 'reuse complete panel status without a redundant probe');
+        assert.equal(h.statusRequests.length, 2, 'the panel does not populate unassembled Save Generate state');
         assertNoRequestMarker(h);
     });
 }

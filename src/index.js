@@ -14,7 +14,6 @@ import { installPageRestoreSelectionGuard } from './features/globalGuards.js';
 import { installSaveRequestGzipFetchHook } from './features/gzipHook.js';
 import { installPerformanceTraceFetchHook, recordPerformanceTraceLongDomRefresh } from './features/perfTrace.js';
 import { installReloadGreetingGuard } from './features/reloadGuard.js';
-import { installSaveGenerateFetchHook } from './features/saveGenerate.js';
 import { applyFeatureSettings, renderSettingsPanel } from './features/settingsPanel.js';
 import { extensionState, initializeSettings, saveExtensionSettings, settings } from './features/state.js';
 import { initializeExtensionUpdateCheck } from './features/updateCheck.js';
@@ -63,10 +62,8 @@ installSaveRequestGzipFetchHook();
 installPerformanceTraceFetchHook();
 // 先生命周期、后重试:停止信号要先于重试模块的监听器更新。
 installGenerationLifecycle();
-// 必须先于 save-generate 安装:重试要包在里层,这样它看到的是 save-generate 真正发出去的
-// 那一次请求(接管时是 save-generate 地址,退回时是原生地址),重发不会重跑接管判定。
+// Personal Stable does not assemble Save Generate. Generate Retry keeps its native path.
 installGenerateRetryFetchHook();
-installSaveGenerateFetchHook();
 installGenerateBlacklistRetry();
 installExtensionUpdateDiagnosticsFetchHook();
 // 必须包在诊断钩子外层:任务 id 头要加在请求上,诊断钩子再按响应里的柏宝库标记跳过。

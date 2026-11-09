@@ -296,12 +296,8 @@ async function renderSettingsPanel() {
         });
 
     $('#bai_bai_toolkit_save_generate_enabled')
-        .prop('checked', settings.saveGenerateEnabled)
-        .on('input', function () {
-            settings.saveGenerateEnabled = Boolean($(this).prop('checked'));
-            saveExtensionSettings();
-            applyBaibaokuPanelLocalState(container);
-        });
+        .prop('checked', false)
+        .prop('disabled', true);
 
     $('#bai_bai_toolkit_preset_auto_backup_enabled')
         .prop('checked', settings.presetAutoBackupEnabled !== false)
