@@ -17,7 +17,7 @@
 | NAS 当前 tracking | `origin/personal/stable` |
 | 2026-11-12 核验时工作区 | clean |
 
-2026-11-12 核验时，GitHub 的 `personal/stable` 为 `ac1279a7535a424c3dc3b2f7a5b2913783fdf7e8`，比 NAS 的 `2f6a9c54` 多一个仅修改 `AGENTS.md` 维护链接的文档提交。该差异不包含 Runtime 或 `dist` 变化；本文件及后续维护文档提交也属于文档更新，不代表 NAS 已经安装这些提交。
+本轮开始核验时，GitHub 的 `personal/stable` 为 `ac1279a7535a424c3dc3b2f7a5b2913783fdf7e8`，比 NAS 的 `2f6a9c54` 多一个仅修改 `AGENTS.md` 维护链接的文档提交。随后本次新增/更新的 Runbook、AGENTS 和 README 也只包含文档内容；本次文档提交不会改变 Runtime 或 `dist`，但会让酒馆扩展管理器看到新的 Git commit。NAS 是否同步这些文档提交由用户决定。
 
 柏宝箱代码通过 Docker bind mount 从宿主机加载。更新这个 Git 目录不需要重新构建或拉取 SillyTavern Docker 镜像，也通常不需要重启 Server；更新完成后需要浏览器完整刷新，使新构建产物被加载。
 
@@ -87,7 +87,7 @@ tracking branch = origin/personal/stable
 
 ## 5. 回滚边界
 
-- 首选在个人仓库创建经过审查的 revert commit，正常推进到 `personal/stable)，再使用酒馆原生更新器同步。
+- 首选在个人仓库创建经过审查的 revert commit，正常推进到 `personal/stable`，再使用酒馆原生更新器同步。
 - 不 force-push、不重写 stable 历史，不通过把分支强行倒退来驱动客户端回滚。
 - 回滚后完整刷新页面，并验证 Save Generate 仍未装配、相邻 ST Core 生成行为没有被改变。
 - 柏宝箱回滚不等于回滚 ST Core 或柏宝库；三个仓库必须按兼容矩阵分别判断。
