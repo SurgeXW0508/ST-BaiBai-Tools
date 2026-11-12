@@ -26,7 +26,7 @@
 - 上游：[`baibai-git/ST-BaiBai-Tools`](https://github.com/baibai-git/ST-BaiBai-Tools)，`main`。
 - 个人 Fork：[`SurgeXW0508/ST-BaiBai-Tools`](https://github.com/SurgeXW0508/ST-BaiBai-Tools)。
 - 个人 `main`：纯上游同步镜像，不放个人 Runtime 策略。
-- 个人 `personal/stable`：唯一生产部署分支。NAS 不安装个人 `main)，也不直接跟踪原作者仓库。
+- 个人 `personal/stable`：唯一生产部署分支。NAS 不安装个人 `main`，也不直接跟踪原作者仓库。
 
 ### 上游更新流程
 
@@ -71,7 +71,7 @@ tracking branch = origin/personal/stable
 前置条件：本地扩展仓库 origin、当前分支和 tracking 必须与第 3 节一致，工作区无未提交修改。
 
 1. 确认 GitHub 的 `personal/stable` 已包含本次通过审查的提交。
-2. 打开 SillyTavern → 扩展管理/已安装扩展，找到 `ST-BaiBai-Tools)。
+2. 打开 SillyTavern → 扩展管理/已安装扩展，找到 `ST-BaiBai-Tools`。
 3. 点击该扩展的更新操作，等待更新结果和新 commit。
 4. 完整刷新浏览器页面。若浏览器仍使用旧脚本，重新打开酒馆页面再验证。
 5. 检查扩展已正常加载，并执行本次变更涉及的最小功能验证。
