@@ -17,7 +17,7 @@
 | NAS 当前 tracking | `origin/personal/stable` |
 | 2026-11-12 核验时工作区 | clean |
 
-本轮开始核验时，GitHub 的 `personal/stable` 为 `ac1279a7535a424c3dc3b2f7a5b2913783fdf7e8`，比 NAS 的 `2f6a9c54` 多一个仅修改 `AGENTS.md` 维护链接的文档提交。随后本次新增/更新的 Runbook、AGENTS 和 README 也只包含文档内容；本次文档提交不会改变 Runtime 或 `dist`，但会让酒馆扩展管理器看到新的 Git commit。NAS 是否同步这些文档提交由用户决定。
+本轮开始核验时，GitHub 的 `personal/stable` 为 `ac1279a7535a424c3dc3b2f7a5b2913783fdf7e8`，比 NAS 的 `2f6a9c54` 多一个仅修改 `AGENTS.md` 维护链接的文档提交。本次 Runbook、AGENTS 和 README 更新后，GitHub `personal/stable` 当前为 `dab6a05c9786599fbdb512e23fbd722da0c75582`；从 NAS 的 `2f6a9c54` 到该 HEAD 共 6 个提交，变更文件仅为 `AGENTS.md`、`README.md` 和 `docs/PERSONAL_MAINTENANCE.md`，不包含 Runtime 或 `dist`。NAS 尚未同步这些文档提交；扩展管理器可能显示 Git 更新提示，由用户决定是否同步。
 
 柏宝箱代码通过 Docker bind mount 从宿主机加载。更新这个 Git 目录不需要重新构建或拉取 SillyTavern Docker 镜像，也通常不需要重启 Server；更新完成后需要浏览器完整刷新，使新构建产物被加载。
 
