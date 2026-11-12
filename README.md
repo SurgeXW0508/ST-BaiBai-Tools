@@ -290,3 +290,7 @@ src/
 - CodeMirror 相关编辑器加载失败时会恢复原生 textarea。
 - Gzip 保存请求仅在公网访问时启用，并在失败时自动改用未压缩请求重试。
 - 消息完成提示音的内置音频按需加载；URL 音频能否播放取决于浏览器支持和远端访问情况；本地文件仅保存在当前浏览器；移动端静音保活只能提高后台播放成功率，无法绕过系统强制休眠、浏览器杀后台或省电策略。
+
+## 个人 Fork 维护与 NAS 更新
+
+本仓库的上游同步、`personal/stable` 生产分支、SillyTavern 原生扩展更新和回滚流程见 [个人维护与部署说明](docs/PERSONAL_MAINTENANCE.md)。涉及 ST Core 与柏宝库的能力归属时，以 [SillyTavern Personal 维护规范](https://github.com/SurgeXW0508/SillyTavern/blob/release/docs/personal-fork/MAINTENANCE_COMPATIBILITY.md) 为准。
