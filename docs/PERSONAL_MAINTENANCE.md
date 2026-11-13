@@ -34,7 +34,7 @@
 2. 对比上游新旧提交，检查与当前 ST Core、柏宝库的接口和生命周期影响。
 3. 阅读 [ST canonical maintenance rules](https://github.com/SurgeXW0508/SillyTavern/blob/release/docs/personal-fork/MAINTENANCE_COMPATIBILITY.md)，完成 Capability Ownership Review。特别确认 Save Generate 仍然不装配，不恢复与 ST Core 重叠的生成生命周期或 Vertex Adapter。
 4. 在独立候选分支验证变更。源码有变化时，从锁文件安装依赖，运行受影响测试、`npm run test:personal-stable` 和必要的相邻测试，再执行生产构建 `npm run build`。
-5. `manifest.json` 指向的运行时代码是 `dist/index.js`。源码修改后必须重新构建并将正确的 `dist` 与源码一起提交到候选分支；不要只提交 `src` 而遗漏构建产物。
+5. `manifest.json` 指向的运行时代码是 `dist/index.js`（浏览器固定挂载在 `/scripts/extensions/third-party/<扩展>/dist/index.js`）。`vite.config.mjs` 已按运行时挂载 URL 与 `manifest.json` 入口固定计算 `@sillytavern/*` 相对层级（`../../../../../`），不再依赖源码检出目录是否位于 `public/` 下（`FX3-1`）；源码修改后必须执行 `npm run build` 与 `npm run test:personal-stable` 核验真实交付入口及 17 个宿主模块导入路径/导出符号，再将正确的 `dist` 与源码一起提交到候选分支，不要只提交 `src` 而遗漏构建产物。
 6. 审查通过后，将候选以正常 PR/快进方式推进到 `personal/stable`。不要 force-push、rebase 或重写已被 NAS 跟踪的公开 stable 历史。
 7. 只有用户明确决定部署时，才通过酒馆扩展管理器更新 NAS。
 
