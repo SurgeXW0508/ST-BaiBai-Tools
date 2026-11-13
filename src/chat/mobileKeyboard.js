@@ -1,4 +1,5 @@
 import { isMobile } from '@sillytavern/scripts/RossAscends-mods';
+import { registerScrollTopWriteInterceptor } from '../scrollTopPatch.js';
 import { CHAT_MESSAGE_EDIT_SELECTOR, MOBILE_AUTO_KEYBOARD_DIRECT_FOCUS_WINDOW_MS, MOBILE_AUTO_KEYBOARD_FOCUS_PATCH_KEY, MOBILE_AUTO_KEYBOARD_HANDLER_KEY, MOBILE_AUTO_KEYBOARD_JQUERY_FOCUS_PATCH_KEY, MOBILE_AUTO_KEYBOARD_JQUERY_TRIGGER_PATCH_KEY, MOBILE_AUTO_KEYBOARD_TARGET_SELECTOR, MOBILE_CHAT_ENTRY_KEYBOARD_TARGET_SELECTOR, MOBILE_DIRECT_KEYBOARD_TARGET_SELECTOR, MOBILE_MESSAGE_EDIT_CARET_CONTEXT_LINES, MOBILE_MESSAGE_EDIT_CARET_VISIBLE_PADDING, MOBILE_MESSAGE_EDIT_EDITOR_SCROLL_INTENT_MS, MOBILE_MESSAGE_EDIT_SCROLL_RESTORE_DELAYS, MOBILE_MESSAGE_EDIT_SCROLL_RESTORE_TOLERANCE, MOBILE_MESSAGE_EDIT_SCROLL_TOP_PATCH_KEY, MOBILE_MESSAGE_EDIT_SELECTOR } from './constants.js';
 import { LOG_PREFIX, extensionState, settings } from './state.js';
 
@@ -55,50 +56,14 @@ function applyMobileMessageEditScrollGuard() {
 }
 
 function patchMobileMessageEditChatScrollTop() {
-    const target = getMobileMessageEditScrollTopDescriptorTarget();
-
-    if (
-        !target?.descriptor?.get
-        || !target.descriptor?.set
-        || target.descriptor.set[MOBILE_MESSAGE_EDIT_SCROLL_TOP_PATCH_KEY]
-    ) {
-        return;
-    }
-
-    const { prototype, descriptor } = target;
-
-    function guardedScrollTopSetter(value) {
-        if (shouldBlockMobileMessageEditChatScrollTop(this, value)) {
-            return;
-        }
-
-        return descriptor.set.call(this, value);
-    }
-
-    guardedScrollTopSetter[MOBILE_MESSAGE_EDIT_SCROLL_TOP_PATCH_KEY] = true;
-    guardedScrollTopSetter.__baiBaiToolkitOriginalScrollTopSetter = descriptor.set;
-
-    Object.defineProperty(prototype, 'scrollTop', {
-        ...descriptor,
-        set: guardedScrollTopSetter,
-    });
-}
-
-function getMobileMessageEditScrollTopDescriptorTarget() {
-    const prototypes = [
-        globalThis.Element?.prototype,
-        globalThis.HTMLElement?.prototype,
-    ].filter(Boolean);
-
-    for (const prototype of prototypes) {
-        const descriptor = Object.getOwnPropertyDescriptor(prototype, 'scrollTop');
-
-        if (descriptor?.get && descriptor?.set) {
-            return { prototype, descriptor };
-        }
-    }
-
-    return null;
+    registerScrollTopWriteInterceptor(
+        'mobileMessageEditScrollGuard',
+        (element, value) => shouldBlockMobileMessageEditChatScrollTop(element, value),
+        {
+            priority: 10,
+            flagKey: MOBILE_MESSAGE_EDIT_SCROLL_TOP_PATCH_KEY,
+        },
+    );
 }
 
 function shouldBlockMobileMessageEditChatScrollTop(element, value) {

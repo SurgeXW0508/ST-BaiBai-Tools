@@ -2,6 +2,7 @@ import * as scriptModule from '@sillytavern/script';
 import { getRequestHeaders, saveSettingsDebounced } from '@sillytavern/script';
 import { applyPowerUserSettings, power_user } from '@sillytavern/scripts/power-user';
 import { cancelDebounce } from '@sillytavern/scripts/utils';
+import { registerScrollTopWriteInterceptor } from '../scrollTopPatch.js';
 import { BAIBAOKU_EARLY_BRIDGE_KEY, BAIBAOKU_THEME_COLOR_BINDINGS, BAIBAOKU_THEME_GET_URL, BAIBAOKU_THEME_LOADING_FIXED_CLASS, BAIBAOKU_THEME_LOADING_HOST_CLASS, BAIBAOKU_THEME_LOADING_OVERLAY_CLASS, BAIBAOKU_THEME_LOADING_SPINNER_CLASS, BAIBAOKU_THEME_LOADING_STYLE_ID, BAIBAOKU_THEME_POWER_USER_KEYS, CUSTOM_CSS_CODEMIRROR_EDITOR_KEY, CUSTOM_CSS_THEME_SYNC_SETTLE_DELAYS_MS, LAZY_THEME_CHANGE_GUARD_KEY, LOG_PREFIX, THEME_APPLY_REFLOW_GUARD_METRICS, THEME_APPLY_REFLOW_GUARD_PATCH_KEY, THEME_APPLY_REFLOW_GUARD_WINDOW_MS, THEME_CACHE_SYNC_FETCH_KEY, THEME_DELETE_PATH, THEME_MANAGER_BACKGROUND_BINDINGS_KEY, THEME_MANAGER_BACKGROUND_SELECTOR, THEME_MANAGER_PANEL_SELECTOR, THEME_MANAGER_THEME_ITEM_SELECTOR, THEME_SAVE_PATH } from './constants.js';
 import { syncCustomCssStateFromSettings } from './customCss.js';
 import { getFetchRequestMethod, getFetchRequestUrl, isFetchRequest } from './gzipHook.js';
@@ -657,17 +658,14 @@ function installThemeApplyReflowGuard(state) {
 // 200ms+)。把写入合并推迟到下一帧:浏览器先完成正常的样式/布局管线,rAF 里的
 // 写入就只是廉价的滚动位移。多次写入只保留最后一次(自动滚底本就幂等)。
 function installThemeApplyScrollTopWriteDeferral(state, prototype) {
-    const descriptor = Object.getOwnPropertyDescriptor(prototype, 'scrollTop');
+    registerScrollTopWriteInterceptor(
+        'themeApplyScrollTopDeferral',
+        (element, value, originalSet) => {
+            if (!(element instanceof HTMLElement) || element.id !== 'chat' || Date.now() >= state.windowUntil) {
+                return false;
+            }
 
-    if (!descriptor?.set || descriptor.set[THEME_APPLY_REFLOW_GUARD_PATCH_KEY]) {
-        return;
-    }
-
-    const originalSet = descriptor.set;
-
-    function themeWindowScrollTopSetter(value) {
-        if (this instanceof HTMLElement && this.id === 'chat' && Date.now() < state.windowUntil) {
-            state.pendingScrollTop = { element: this, value };
+            state.pendingScrollTop = { element, value };
 
             if (!state.scrollTopFlushFrame && typeof requestAnimationFrame === 'function') {
                 state.scrollTopFlushFrame = requestAnimationFrame(() => {
@@ -681,19 +679,14 @@ function installThemeApplyScrollTopWriteDeferral(state, prototype) {
                 });
             }
 
-            return;
-        }
-
-        return originalSet.call(this, value);
-    }
-
-    themeWindowScrollTopSetter[THEME_APPLY_REFLOW_GUARD_PATCH_KEY] = true;
-    themeWindowScrollTopSetter.__baiBaiToolkitOriginalScrollTopSetter = originalSet;
-
-    Object.defineProperty(prototype, 'scrollTop', {
-        ...descriptor,
-        set: themeWindowScrollTopSetter,
-    });
+            return true;
+        },
+        {
+            prototype,
+            priority: 20,
+            flagKey: THEME_APPLY_REFLOW_GUARD_PATCH_KEY,
+        },
+    );
 }
 
 function clearCustomCssCodeMirrorThemeSyncTimers(state = extensionState[CUSTOM_CSS_CODEMIRROR_EDITOR_KEY]) {

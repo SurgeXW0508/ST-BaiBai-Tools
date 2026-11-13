@@ -258,7 +258,7 @@ function patchFastChatBackupsFetch() {
     }
 
     async function baiBaiToolkitChatBackupsFetch(input, init) {
-        if (isChatBackupsListRequest(input, init)) {
+        if (settings.fastChatListEnabled && isChatBackupsListRequest(input, init)) {
             observeChatManagementPopupCleanup();
             try {
                 return await fetchFastChatBackupsList(originalFetch, input, init);
