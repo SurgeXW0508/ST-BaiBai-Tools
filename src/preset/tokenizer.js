@@ -762,7 +762,7 @@ async function prepareOpenAITokenizerBulkMessages(context = {}) {
 }
 
 function containsUnexpandedPromptMacros(value) {
-    return typeof value === 'string' && (value.includes('{{') || /<(?:USER|CHAR|BOT)>/i.test(value));
+    return typeof value === 'string' && (value.includes('{{') || /<(?:USER|BOT|CHAR|CHARIFNOTGROUP|GROUP)>/i.test(value));
 }
 
 async function prepareOpenAITokenizerWorldInfoBudgetCounts(context = {}) {
