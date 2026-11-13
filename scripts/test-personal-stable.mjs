@@ -1,21 +1,24 @@
 import assert from 'node:assert/strict';
+import { execFile as execFileCb } from 'node:child_process';
 import fs from 'node:fs';
-import { copyFile, mkdtemp, mkdir, readFile, rm, symlink } from 'node:fs/promises';
+import { copyFile, cp, mkdtemp, mkdir, readFile, rm, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import vm from 'node:vm';
 import { parse } from 'espree';
-import { build as viteBuild } from 'vite';
 import * as chatConstants from '../src/chat/constants.js';
 import * as generateRequest from '../src/features/generateRequest.js';
 import * as scrollTopPatch from '../src/scrollTopPatch.js';
 import * as worldInfoConstants from '../src/worldinfo/constants.js';
 import { resolveRuntimeSillyTavernRelativePath, resolveSillyTavernImportSpecifier } from '../vite.config.mjs';
 
+const execFileAsync = promisify(execFileCb);
+
 const featureConstants = {
-    CURRENT_VERSION: '1.1.5',
+    CURRENT_VERSION: '1.2.0',
     LOG_PREFIX: '[test]',
     BAIBAOKU_EXTENSIONS_URL: '/api/plugins/baibaoku/v1/extensions',
     BAIBAOKU_SAVE_GENERATE_URL: '/api/plugins/baibaoku/v1/chats/save-generate',
@@ -1013,11 +1016,60 @@ function collectModuleExportNames(filePath, seen = new Set()) {
     return exported;
 }
 
-test('FX3-1: manifest.json entry (dist/index.js) resolves all ST host imports independent of checkout path and links cleanly', async () => {
+const EXPECTED_STATIC_HOST_MODULES = [
+    'script.js',
+    'scripts/PromptManager.js',
+    'scripts/RossAscends-mods.js',
+    'scripts/autocomplete/AutoComplete.js',
+    'scripts/extensions.js',
+    'scripts/extensions/regex/engine.js',
+    'scripts/group-chats.js',
+    'scripts/i18n.js',
+    'scripts/openai.js',
+    'scripts/popup.js',
+    'scripts/power-user.js',
+    'scripts/preset-manager.js',
+    'scripts/templates.js',
+    'scripts/tokenizers.js',
+    'scripts/user.js',
+    'scripts/utils.js',
+    'scripts/world-info.js',
+];
+
+const EXPECTED_DYNAMIC_HOST_IMPORTS = new Map([
+    ['/scripts/world-info.js', ['checkWorldInfo']],
+]);
+
+function collectDynamicImports(rootNode) {
+    const literals = new Set();
+    const nonLiterals = [];
+    const visit = node => {
+        if (!node || typeof node !== 'object') return;
+        if (node.type === 'ImportExpression') {
+            const src = node.source;
+            if (src?.type === 'Literal' && typeof src.value === 'string') {
+                literals.add(src.value);
+            } else {
+                nonLiterals.push(src?.type ?? 'unknown');
+            }
+        }
+        for (const value of Object.values(node)) {
+            if (Array.isArray(value)) {
+                for (const item of value) visit(item);
+            } else if (value && typeof value.type === 'string') {
+                visit(value);
+            }
+        }
+    };
+    visit(rootNode);
+    return { literals: [...literals].sort(), nonLiterals };
+}
+
+test('FX3-1: manifest.json entry (dist/index.js + dist/index.css) resolves all static & dynamic ST host imports independent of checkout path', async () => {
     const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
     // 1. Unit-verify runtime URL relative resolver and @sillytavern/* mapper
-    assert.equal(resolveRuntimeSillyTavernRelativePath('dist/index.js?ver=1.1.5'), '../../../../..');
+    assert.equal(resolveRuntimeSillyTavernRelativePath('dist/index.js?ver=1.2.0'), '../../../../..');
     assert.equal(resolveRuntimeSillyTavernRelativePath('dist/index.js'), '../../../../..');
     assert.equal(resolveRuntimeSillyTavernRelativePath('index.js?ver=1.0.0'), '../../../..');
     assert.equal(resolveRuntimeSillyTavernRelativePath('dist\\nested\\entry.js#frag'), '../../../../../..');
@@ -1034,19 +1086,23 @@ test('FX3-1: manifest.json entry (dist/index.js) resolves all ST host imports in
     assert.throws(() => resolveSillyTavernImportSpecifier('@sillytavern/', '../../../../..'), /Invalid @sillytavern import specifier/);
     assert.throws(() => resolveSillyTavernImportSpecifier('@sillytavern/../secret', '../../../../..'), /Invalid @sillytavern import specifier/);
 
-    // 2. Verify the real delivered artifact referenced by manifest.json
+    // 2. Verify the real delivered artifacts referenced by manifest.json and Pen Shadow DOM
     const manifestJson = JSON.parse(await readFile(path.join(repoRoot, 'manifest.json'), 'utf8'));
     const entryRelPath = path.posix.normalize(String(manifestJson.js ?? '').split(/[?#]/, 1)[0].replaceAll('\\', '/'));
     assert.equal(entryRelPath, 'dist/index.js');
 
     const distEntryPath = path.join(repoRoot, entryRelPath);
-    const distCode = await readFile(distEntryPath, 'utf8');
+    const distCssPath = path.join(repoRoot, 'dist', 'index.css');
+    const [distCode, distCss] = await Promise.all([
+        readFile(distEntryPath, 'utf8'),
+        readFile(distCssPath, 'utf8'),
+    ]);
     assert.ok(distCode.length > 0, 'Committed dist/index.js must not be empty');
+    assert.ok(distCss.length > 0, 'Committed dist/index.css must not be empty');
     assert.equal(distCode.includes('@sillytavern/'), false, 'Committed dist/index.js must not retain bare @sillytavern/ specifiers');
 
     const ast = parse(distCode, { ecmaVersion: 'latest', sourceType: 'module' });
     const importDecls = ast.body.filter(node => node.type === 'ImportDeclaration');
-    assert.ok(importDecls.length >= 17, `Expected host module imports in dist/index.js, got ${importDecls.length}`);
 
     const sentinelPublicRoot = '/__st_public__';
     const sentinelExtRoot = `${sentinelPublicRoot}/scripts/extensions/third-party/ST-BaiBai-Tools`;
@@ -1088,8 +1144,24 @@ test('FX3-1: manifest.json entry (dist/index.js) resolves all ST host imports in
         }
     }
 
-    assert.equal(resolvedHostModules.has('script.js'), true, 'dist/index.js must resolve SillyTavern root /script.js');
-    assert.equal(resolvedHostModules.size, 17, `Expected 17 unique SillyTavern host modules, got ${resolvedHostModules.size}`);
+    assert.deepEqual(
+        [...resolvedHostModules.keys()].sort(),
+        EXPECTED_STATIC_HOST_MODULES,
+        'Static SillyTavern host module set changed; review new/removed host contract and update EXPECTED_STATIC_HOST_MODULES',
+    );
+
+    // 2b. Verify dynamic imports in bundled dist/index.js (e.g. import('/scripts/world-info.js'))
+    const dynamicImports = collectDynamicImports(ast);
+    assert.deepEqual(
+        dynamicImports.nonLiterals,
+        [],
+        `Unexpected non-literal dynamic import() in dist/index.js: ${dynamicImports.nonLiterals.join(', ')}`,
+    );
+    assert.deepEqual(
+        dynamicImports.literals,
+        [...EXPECTED_DYNAMIC_HOST_IMPORTS.keys()].sort(),
+        'Dynamic host import() set changed; review runtime URL resolution and update EXPECTED_DYNAMIC_HOST_IMPORTS',
+    );
 
     // 3. Link dist/index.js as a real ES module in node:vm to verify static module bindings
     const linkContext = vm.createContext({ URL, console });
@@ -1114,7 +1186,7 @@ test('FX3-1: manifest.json entry (dist/index.js) resolves all ST host imports in
         return syntheticDeps.get(specifier);
     });
 
-    // 4. When SillyTavern public/ is present alongside this checkout, verify all 17 host files & every imported symbol exist
+    // 4. When SillyTavern public/ is present alongside this checkout, verify all static & dynamic host files and symbols exist
     const candidateStPublic = process.env.SILLYTAVERN_PUBLIC_DIR
         || path.resolve(repoRoot, '..', 'SillyTavern', 'public');
     if (fs.existsSync(path.join(candidateStPublic, 'script.js'))) {
@@ -1130,39 +1202,160 @@ test('FX3-1: manifest.json entry (dist/index.js) resolves all ST host imports in
                 );
             }
         }
+        for (const [dynPath, wantedSymbols] of EXPECTED_DYNAMIC_HOST_IMPORTS.entries()) {
+            const relFromPublic = dynPath.replace(/^\/+/, '');
+            const diskPath = path.join(candidateStPublic, relFromPublic);
+            assert.equal(fs.existsSync(diskPath), true, `Dynamic host module missing in SillyTavern/public: ${dynPath}`);
+            const actualExports = collectModuleExportNames(diskPath);
+            for (const sym of wantedSymbols) {
+                assert.equal(
+                    actualExports.has(sym),
+                    true,
+                    `Dynamic host module ${dynPath} does not export expected symbol "${sym}"`,
+                );
+            }
+        }
     }
 
-    // 5. Prove Vite build output is identical regardless of checkout path depth or ancestor "public" segment
+    // 5. Prove Vite build output (JS + CSS) is deterministic and identical regardless of checkout path depth or ancestor "public" segment
+    const viteCliPath = path.join(repoRoot, 'node_modules', 'vite', 'bin', 'vite.js');
     const tmpBase = await mkdtemp(path.join(os.tmpdir(), 'bbt-vite-layout-'));
     try {
         const layouts = [
             path.join(tmpBase, 'flat-checkout'),
             path.join(tmpBase, 'nested', 'public', 'trap', 'deeper', 'ST-BaiBai-Tools'),
         ];
-        for (const workDir of layouts) {
+        for (let i = 0; i < layouts.length; i += 1) {
+            const workDir = layouts[i];
             await mkdir(workDir, { recursive: true });
             await Promise.all([
                 copyFile(path.join(repoRoot, 'vite.config.mjs'), path.join(workDir, 'vite.config.mjs')),
+                copyFile(path.join(repoRoot, 'tsconfig.json'), path.join(workDir, 'tsconfig.json')),
                 copyFile(path.join(repoRoot, 'package.json'), path.join(workDir, 'package.json')),
                 copyFile(path.join(repoRoot, 'manifest.json'), path.join(workDir, 'manifest.json')),
-                symlink(path.join(repoRoot, 'src'), path.join(workDir, 'src'), 'dir'),
+                cp(path.join(repoRoot, 'src'), path.join(workDir, 'src'), { recursive: true }),
                 symlink(path.join(repoRoot, 'node_modules'), path.join(workDir, 'node_modules'), 'dir'),
             ]);
-            await viteBuild({
-                root: workDir,
-                configFile: path.join(workDir, 'vite.config.mjs'),
-                mode: 'production',
-                logLevel: 'silent',
-            });
-            const rebuiltCode = await readFile(path.join(workDir, 'dist', 'index.js'), 'utf8');
-            assert.equal(
-                rebuiltCode,
-                distCode,
-                `Build output in ${workDir} must match committed dist/index.js byte-for-byte`,
+            await execFileAsync(
+                process.execPath,
+                [viteCliPath, 'build', '--mode', 'production', '--logLevel', 'silent'],
+                { cwd: workDir },
             );
+            const [rebuiltCode, rebuiltCss] = await Promise.all([
+                readFile(path.join(workDir, 'dist', 'index.js'), 'utf8'),
+                readFile(path.join(workDir, 'dist', 'index.css'), 'utf8'),
+            ]);
+            assert.equal(
+                rebuiltCode === distCode,
+                true,
+                `Build output dist/index.js in ${workDir} must match committed dist/index.js byte-for-byte`,
+            );
+            assert.equal(
+                rebuiltCss === distCss,
+                true,
+                `Build output dist/index.css in ${workDir} must match committed dist/index.css byte-for-byte`,
+            );
+
+            // Determinism check on first layout: consecutive build produces identical JS + CSS
+            if (i === 0) {
+                await execFileAsync(
+                    process.execPath,
+                    [viteCliPath, 'build', '--mode', 'production', '--logLevel', 'silent'],
+                    { cwd: workDir },
+                );
+                const [secondCode, secondCss] = await Promise.all([
+                    readFile(path.join(workDir, 'dist', 'index.js'), 'utf8'),
+                    readFile(path.join(workDir, 'dist', 'index.css'), 'utf8'),
+                ]);
+                assert.equal(secondCode === rebuiltCode, true, 'Consecutive Vite builds must produce byte-identical dist/index.js');
+                assert.equal(secondCss === rebuiltCss, true, 'Consecutive Vite builds must produce byte-identical dist/index.css');
+            }
         }
     } finally {
         await rm(tmpBase, { recursive: true, force: true });
     }
 });
+
+test('Built-in Pen (floorManager) Feature Off, standalone-coexistence, and .gitignore personal-doc guards', async () => {
+    const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+    // 1. Verify .gitignore ignores generic docs/* scratch files while keeping docs/PERSONAL_MAINTENANCE.md unignored
+    const gitignoreText = await readFile(path.join(repoRoot, '.gitignore'), 'utf8');
+    assert.match(gitignoreText, /^docs\/\*/m, '.gitignore should ignore docs/*');
+    assert.match(gitignoreText, /^!docs\/PERSONAL_MAINTENANCE\.md$/m, '.gitignore must keep docs/PERSONAL_MAINTENANCE.md unignored');
+    assert.equal(/^docs\/$/m.test(gitignoreText), false, '.gitignore must not blanket-ignore docs/ directory');
+
+    // 2. Verify Pen lifecycle teardown in src/pen/index.ts and zero Save Generate coupling
+    const penEntry = await readFile(path.join(repoRoot, 'src', 'pen', 'index.ts'), 'utf8');
+    assert.match(penEntry, /const HOST_ID = 'bby-app-host'/, 'Pen Shadow host ID contract');
+    assert.match(penEntry, /versionedAssetUrl\('\.\/index\.css',\s*import\.meta\.url\)/, 'Pen Shadow root CSS path contract');
+    assert.match(penEntry, /export function stopPen\(\)[\s\S]*?unbindEditButtons\(\)[\s\S]*?closePen\(\)[\s\S]*?app\?\.unmount\(\)[\s\S]*?document\.getElementById\(HOST_ID\)\?\.remove\(\)/);
+
+    // 3. Execute src/floorManager.js in an isolated VM context to verify Feature Off & standalone Pen coexistence
+    const floorManagerCode = await readFile(path.join(repoRoot, 'src', 'floorManager.js'), 'utf8');
+    const calls = [];
+    const extNames = [];
+    const extSettings = { disabledExtensions: [] };
+    const ctx = vm.createContext({ console: { debug: () => {} } });
+    const mod = new vm.SourceTextModule(floorManagerCode, {
+        context: ctx,
+        identifier: path.join(repoRoot, 'src', 'floorManager.js'),
+    });
+    const mocks = new Map([
+        ['@sillytavern/scripts/extensions', new vm.SyntheticModule(['extension_settings', 'extensionNames'], function () {
+            this.setExport('extension_settings', extSettings);
+            this.setExport('extensionNames', extNames);
+        }, { context: ctx })],
+        ['./floorDirectory.js', new vm.SyntheticModule(['configureFloorDirectory', 'installFloorDirectory', 'openFloorDirectoryDialog'], function () {
+            let openCb = null;
+            this.setExport('configureFloorDirectory', cfg => { openCb = cfg.open; calls.push(['configureFloorDirectory', Boolean(openCb)]); });
+            this.setExport('installFloorDirectory', () => { calls.push(['installFloorDirectory']); });
+            this.setExport('openFloorDirectoryDialog', () => { calls.push(['openFloorDirectoryDialog']); });
+            ctx.__triggerOpen = () => openCb?.();
+        }, { context: ctx })],
+        ['./pen/index.ts', new vm.SyntheticModule(['openPenWindow', 'startPen', 'stopPen'], function () {
+            this.setExport('openPenWindow', () => { calls.push(['openPenWindow']); });
+            this.setExport('startPen', () => { calls.push(['startPen']); });
+            this.setExport('stopPen', () => { calls.push(['stopPen']); });
+        }, { context: ctx })],
+    ]);
+    await mod.link(spec => {
+        const found = mocks.get(spec);
+        assert.ok(found, `Unexpected import in floorManager.js: ${spec}`);
+        return found;
+    });
+    await mod.evaluate();
+
+    const settingsObj = { newFloorManagerEnabled: true };
+    mod.namespace.configureFloorManager({ settings: settingsObj, extensionState: {}, logPrefix: '[test]', saveSettings: () => {} });
+    calls.length = 0;
+
+    // Default ON -> starts Pen and routes menu open to Pen
+    mod.namespace.installFloorManager();
+    ctx.__triggerOpen();
+    assert.deepEqual(calls, [['installFloorDirectory'], ['startPen'], ['openPenWindow']]);
+
+    // Feature Off -> stops Pen and routes menu open to legacy floorDirectory
+    calls.length = 0;
+    settingsObj.newFloorManagerEnabled = false;
+    mod.namespace.applyFloorManager();
+    ctx.__triggerOpen();
+    assert.deepEqual(calls, [['stopPen'], ['openFloorDirectoryDialog']]);
+
+    // Standalone ST-BaiBai-Pen / ST-BaiBai-Inkwell enabled -> built-in Pen stays stopped even when toggle is true
+    calls.length = 0;
+    settingsObj.newFloorManagerEnabled = true;
+    extNames.push('third-party/ST-BaiBai-Inkwell');
+    mod.namespace.applyFloorManager();
+    ctx.__triggerOpen();
+    assert.deepEqual(calls, [['stopPen'], ['openFloorDirectoryDialog']]);
+
+    // Standalone disabled -> built-in Pen resumes
+    calls.length = 0;
+    extSettings.disabledExtensions.push('third-party/ST-BaiBai-Inkwell');
+    mod.namespace.applyFloorManager();
+    ctx.__triggerOpen();
+    assert.deepEqual(calls, [['startPen'], ['openPenWindow']]);
+});
+
 

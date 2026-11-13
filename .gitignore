@@ -9,4 +9,5 @@ node_modules/
 Trace-*.json
 dist/*.map
 .preview/
-docs/
+docs/*
+!docs/PERSONAL_MAINTENANCE.md
