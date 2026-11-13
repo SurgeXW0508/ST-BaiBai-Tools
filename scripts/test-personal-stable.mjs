@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import fs from 'node:fs';
+import { copyFile, mkdtemp, mkdir, readFile, rm, symlink } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import { parse } from 'espree';
+import { build as viteBuild } from 'vite';
 import * as chatConstants from '../src/chat/constants.js';
 import * as generateRequest from '../src/features/generateRequest.js';
 import * as scrollTopPatch from '../src/scrollTopPatch.js';
 import * as worldInfoConstants from '../src/worldinfo/constants.js';
+import { resolveRuntimeSillyTavernRelativePath, resolveSillyTavernImportSpecifier } from '../vite.config.mjs';
 
 const featureConstants = {
     CURRENT_VERSION: '1.1.5',
@@ -965,3 +971,198 @@ test('FX2-2 & FX2-3: legacy <GROUP>/<CHARIFNOTGROUP> macro gating and scrollTop 
         console.debug = origDebug;
     }
 });
+
+function collectModuleExportNames(filePath, seen = new Set()) {
+    if (seen.has(filePath)) return new Set();
+    seen.add(filePath);
+    const source = fs.readFileSync(filePath, 'utf8');
+    const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'module' });
+    const exported = new Set();
+    for (const node of ast.body) {
+        if (node.type === 'ExportNamedDeclaration') {
+            if (node.declaration) {
+                const decl = node.declaration;
+                if (decl.id?.name) exported.add(decl.id.name);
+                if (Array.isArray(decl.declarations)) {
+                    for (const item of decl.declarations) {
+                        if (item.id?.type === 'Identifier') {
+                            exported.add(item.id.name);
+                        } else if (item.id?.type === 'ObjectPattern') {
+                            for (const prop of item.id.properties || []) {
+                                if (prop.value?.type === 'Identifier') exported.add(prop.value.name);
+                            }
+                        }
+                    }
+                }
+            }
+            for (const spec of node.specifiers || []) {
+                const name = spec.exported?.name || spec.exported?.value;
+                if (name) exported.add(name);
+            }
+        } else if (node.type === 'ExportDefaultDeclaration') {
+            exported.add('default');
+        } else if (node.type === 'ExportAllDeclaration' && typeof node.source?.value === 'string') {
+            const targetPath = path.resolve(path.dirname(filePath), node.source.value);
+            if (fs.existsSync(targetPath)) {
+                for (const name of collectModuleExportNames(targetPath, seen)) {
+                    exported.add(name);
+                }
+            }
+        }
+    }
+    return exported;
+}
+
+test('FX3-1: manifest.json entry (dist/index.js) resolves all ST host imports independent of checkout path and links cleanly', async () => {
+    const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+    // 1. Unit-verify runtime URL relative resolver and @sillytavern/* mapper
+    assert.equal(resolveRuntimeSillyTavernRelativePath('dist/index.js?ver=1.1.5'), '../../../../..');
+    assert.equal(resolveRuntimeSillyTavernRelativePath('dist/index.js'), '../../../../..');
+    assert.equal(resolveRuntimeSillyTavernRelativePath('index.js?ver=1.0.0'), '../../../..');
+    assert.equal(resolveRuntimeSillyTavernRelativePath('dist\\nested\\entry.js#frag'), '../../../../../..');
+    assert.throws(() => resolveRuntimeSillyTavernRelativePath(''), /Invalid manifest\.json "js" entry path/);
+    assert.throws(() => resolveRuntimeSillyTavernRelativePath('../escape.js'), /Invalid manifest\.json "js" entry path/);
+    assert.throws(() => resolveRuntimeSillyTavernRelativePath('dist/../../escape.js'), /Invalid manifest\.json "js" entry path/);
+
+    assert.equal(resolveSillyTavernImportSpecifier('@sillytavern/script', '../../../../..'), '../../../../../script.js');
+    assert.equal(
+        resolveSillyTavernImportSpecifier('@sillytavern/scripts/extensions/regex/engine.js', '../../../../..'),
+        '../../../../../scripts/extensions/regex/engine.js',
+    );
+    assert.equal(resolveSillyTavernImportSpecifier('vue', '../../../../..'), null);
+    assert.throws(() => resolveSillyTavernImportSpecifier('@sillytavern/', '../../../../..'), /Invalid @sillytavern import specifier/);
+    assert.throws(() => resolveSillyTavernImportSpecifier('@sillytavern/../secret', '../../../../..'), /Invalid @sillytavern import specifier/);
+
+    // 2. Verify the real delivered artifact referenced by manifest.json
+    const manifestJson = JSON.parse(await readFile(path.join(repoRoot, 'manifest.json'), 'utf8'));
+    const entryRelPath = path.posix.normalize(String(manifestJson.js ?? '').split(/[?#]/, 1)[0].replaceAll('\\', '/'));
+    assert.equal(entryRelPath, 'dist/index.js');
+
+    const distEntryPath = path.join(repoRoot, entryRelPath);
+    const distCode = await readFile(distEntryPath, 'utf8');
+    assert.ok(distCode.length > 0, 'Committed dist/index.js must not be empty');
+    assert.equal(distCode.includes('@sillytavern/'), false, 'Committed dist/index.js must not retain bare @sillytavern/ specifiers');
+
+    const ast = parse(distCode, { ecmaVersion: 'latest', sourceType: 'module' });
+    const importDecls = ast.body.filter(node => node.type === 'ImportDeclaration');
+    assert.ok(importDecls.length >= 17, `Expected host module imports in dist/index.js, got ${importDecls.length}`);
+
+    const sentinelPublicRoot = '/__st_public__';
+    const sentinelExtRoot = `${sentinelPublicRoot}/scripts/extensions/third-party/ST-BaiBai-Tools`;
+    const sentinelEntryPath = path.posix.join(sentinelExtRoot, entryRelPath);
+    const sentinelEntryDir = path.posix.dirname(sentinelEntryPath);
+
+    const resolvedHostModules = new Map();
+    for (const decl of importDecls) {
+        const spec = String(decl.source?.value ?? '');
+        assert.equal(spec.startsWith('@sillytavern/'), false, `Unresolved @sillytavern specifier: ${spec}`);
+        assert.equal(spec.startsWith('../'), true, `Expected relative import in bundled dist/index.js, got: ${spec}`);
+
+        const resolvedPosix = path.posix.resolve(sentinelEntryDir, spec);
+        assert.equal(
+            resolvedPosix.startsWith(`${sentinelPublicRoot}/`),
+            true,
+            `Import "${spec}" escaped above SillyTavern public/ root: ${resolvedPosix}`,
+        );
+        assert.notEqual(
+            resolvedPosix,
+            `${sentinelPublicRoot}/scripts/script.js`,
+            `Import "${spec}" resolved to broken /scripts/script.js (missing ../ depth)`,
+        );
+
+        if (resolvedPosix.startsWith(`${sentinelExtRoot}/`)) {
+            const extLocalRel = path.posix.relative(sentinelExtRoot, resolvedPosix);
+            assert.equal(fs.existsSync(path.join(repoRoot, extLocalRel)), true, `Missing extension-local import: ${extLocalRel}`);
+        } else {
+            const hostRelPath = path.posix.relative(sentinelPublicRoot, resolvedPosix);
+            const wantedNames = resolvedHostModules.get(hostRelPath) ?? new Set();
+            for (const item of decl.specifiers || []) {
+                if (item.type === 'ImportDefaultSpecifier') {
+                    wantedNames.add('default');
+                } else if (item.type === 'ImportSpecifier') {
+                    wantedNames.add(item.imported.name || item.imported.value);
+                }
+            }
+            resolvedHostModules.set(hostRelPath, wantedNames);
+        }
+    }
+
+    assert.equal(resolvedHostModules.has('script.js'), true, 'dist/index.js must resolve SillyTavern root /script.js');
+    assert.equal(resolvedHostModules.size, 17, `Expected 17 unique SillyTavern host modules, got ${resolvedHostModules.size}`);
+
+    // 3. Link dist/index.js as a real ES module in node:vm to verify static module bindings
+    const linkContext = vm.createContext({ URL, console });
+    const syntheticDeps = new Map();
+    const distVmModule = new vm.SourceTextModule(distCode, {
+        context: linkContext,
+        identifier: 'https://sillytavern.local/scripts/extensions/third-party/ST-BaiBai-Tools/dist/index.js',
+    });
+    await distVmModule.link(specifier => {
+        if (!syntheticDeps.has(specifier)) {
+            const names = new Set();
+            for (const decl of importDecls.filter(item => item.source.value === specifier)) {
+                for (const spec of decl.specifiers || []) {
+                    if (spec.type === 'ImportDefaultSpecifier') names.add('default');
+                    if (spec.type === 'ImportSpecifier') names.add(spec.imported.name || spec.imported.value);
+                }
+            }
+            syntheticDeps.set(specifier, new vm.SyntheticModule([...names], function () {
+                for (const name of names) this.setExport(name, () => {});
+            }, { context: linkContext }));
+        }
+        return syntheticDeps.get(specifier);
+    });
+
+    // 4. When SillyTavern public/ is present alongside this checkout, verify all 17 host files & every imported symbol exist
+    const candidateStPublic = process.env.SILLYTAVERN_PUBLIC_DIR
+        || path.resolve(repoRoot, '..', 'SillyTavern', 'public');
+    if (fs.existsSync(path.join(candidateStPublic, 'script.js'))) {
+        for (const [hostRelPath, wantedSymbols] of resolvedHostModules.entries()) {
+            const diskPath = path.join(candidateStPublic, hostRelPath);
+            assert.equal(fs.existsSync(diskPath), true, `Host module missing in SillyTavern/public: ${hostRelPath}`);
+            const actualExports = collectModuleExportNames(diskPath);
+            for (const sym of wantedSymbols) {
+                assert.equal(
+                    actualExports.has(sym),
+                    true,
+                    `Host module ${hostRelPath} does not export imported symbol "${sym}"`,
+                );
+            }
+        }
+    }
+
+    // 5. Prove Vite build output is identical regardless of checkout path depth or ancestor "public" segment
+    const tmpBase = await mkdtemp(path.join(os.tmpdir(), 'bbt-vite-layout-'));
+    try {
+        const layouts = [
+            path.join(tmpBase, 'flat-checkout'),
+            path.join(tmpBase, 'nested', 'public', 'trap', 'deeper', 'ST-BaiBai-Tools'),
+        ];
+        for (const workDir of layouts) {
+            await mkdir(workDir, { recursive: true });
+            await Promise.all([
+                copyFile(path.join(repoRoot, 'vite.config.mjs'), path.join(workDir, 'vite.config.mjs')),
+                copyFile(path.join(repoRoot, 'package.json'), path.join(workDir, 'package.json')),
+                copyFile(path.join(repoRoot, 'manifest.json'), path.join(workDir, 'manifest.json')),
+                symlink(path.join(repoRoot, 'src'), path.join(workDir, 'src'), 'dir'),
+                symlink(path.join(repoRoot, 'node_modules'), path.join(workDir, 'node_modules'), 'dir'),
+            ]);
+            await viteBuild({
+                root: workDir,
+                configFile: path.join(workDir, 'vite.config.mjs'),
+                mode: 'production',
+                logLevel: 'silent',
+            });
+            const rebuiltCode = await readFile(path.join(workDir, 'dist', 'index.js'), 'utf8');
+            assert.equal(
+                rebuiltCode,
+                distCode,
+                `Build output in ${workDir} must match committed dist/index.js byte-for-byte`,
+            );
+        }
+    } finally {
+        await rm(tmpBase, { recursive: true, force: true });
+    }
+});
+
