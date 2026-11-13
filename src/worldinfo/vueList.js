@@ -1,3 +1,4 @@
+// 历史命名，已无 Vue 依赖
 import { resetScrollHeight } from '@sillytavern/scripts/utils';
 import { WORLD_INFO_VUE_LIST_OPTIMIZATION_KEY } from './constants.js';
 import { installWorldInfoEditorSelectGrouping, installWorldInfoEditorSelectSearch, removeWorldInfoEditorSelectGrouping, removeWorldInfoEditorSelectSearch } from './editorSelect.js';
@@ -47,6 +48,7 @@ function getWorldInfoVueListOptimizationState() {
             root: null,
             modulePromise: null,
             renderToken: 0,
+            refreshFrame: 0,
             activeAppendCapture: null,
             originalAppend: null,
             patchedAppend: null,
@@ -64,6 +66,7 @@ function getWorldInfoVueListOptimizationState() {
             worldInfoEditorSelectSearchInteractionGuard: null,
             worldInfoEditorSelectGroupingApplying: false,
             worldInfoGlobalSelectorDropdown: null,
+            worldInfoGlobalSelectorDisplayRaf: 0,
             worldInfoGlobalSelectorSyncHandler: null,
             worldInfoGlobalSelectorTriggerHandler: null,
             worldInfoGlobalSelectorTriggerEvents: null,
@@ -76,7 +79,9 @@ function getWorldInfoVueListOptimizationState() {
 
     const state = extensionState[WORLD_INFO_VUE_LIST_OPTIMIZATION_KEY];
 
+    state.refreshFrame ??= 0;
     state.worldInfoGlobalSelectorDropdown ??= null;
+    state.worldInfoGlobalSelectorDisplayRaf ??= 0;
     state.worldInfoGlobalSelectorSyncHandler ??= null;
     state.worldInfoGlobalSelectorTriggerHandler ??= null;
     state.worldInfoGlobalSelectorTriggerEvents ??= null;
@@ -268,7 +273,7 @@ async function renderWorldInfoVueListFromNativeCallbackLocked(state, renderToken
             return result;
         }
 
-        mountWorldInfoVueListApp(state, list, capture.appendCalls, append);
+        mountWorldInfoVueListApp(state, list, capture.appendCalls, append, renderToken);
         return result;
     } catch (error) {
         console.debug(`${LOG_PREFIX} Failed to render World Info list`, error);
@@ -284,11 +289,34 @@ async function renderWorldInfoVueListFromNativeCallbackLocked(state, renderToken
     }
 }
 
-function mountWorldInfoVueListApp(state, list, appendCalls, append) {
+function mountWorldInfoVueListApp(state, list, appendCalls, append, renderToken = state.renderToken) {
+    if (state.renderToken !== renderToken || !settings.worldInfoListOptimizationEnabled) {
+        return;
+    }
+
     state.root = list;
     applyWorldInfoMobileHeaderLayoutsBeforeAppend(appendCalls);
     appendCapturedWorldInfoListCalls(state, list, appendCalls, append);
-    refreshWorldInfoVueListAfterAppend(list, state);
+
+    if (state.refreshFrame && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(state.refreshFrame);
+        state.refreshFrame = 0;
+    }
+
+    if (typeof requestAnimationFrame === 'function') {
+        state.refreshFrame = requestAnimationFrame(() => {
+            state.refreshFrame = 0;
+            if (state.renderToken !== renderToken || !settings.worldInfoListOptimizationEnabled) {
+                return;
+            }
+            refreshWorldInfoVueListAfterAppend(list, state);
+        });
+        return;
+    }
+
+    if (state.renderToken === renderToken && settings.worldInfoListOptimizationEnabled) {
+        refreshWorldInfoVueListAfterAppend(list, state);
+    }
 }
 
 // 手机版标题栏趁条目还没插进页面就改好:离线时挪节点很便宜,插进页面后再挪,
@@ -384,6 +412,13 @@ function refreshWorldInfoVueListAfterAppend(list, state = getWorldInfoVueListOpt
 }
 
 function unmountWorldInfoVueListApp(state = getWorldInfoVueListOptimizationState()) {
+    if (state.refreshFrame) {
+        if (typeof cancelAnimationFrame === 'function') {
+            cancelAnimationFrame(state.refreshFrame);
+        }
+        state.refreshFrame = 0;
+    }
+
     if (state.app) {
         try {
             state.app.unmount();

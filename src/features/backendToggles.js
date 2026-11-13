@@ -201,19 +201,16 @@ async function setBaibaokuRecentChatListAccelerationEnabled(enabled) {
     }
 }
 
-async function setBaibaokuProgressiveChatLoadingEnabled(enabled) {
-    const previous = settings.progressiveChatLoadingEnabled === true;
+async function setBaibaokuProgressiveChatLoadingEnabled(_enabled) {
     settings.progressiveChatLoadingEnabled = false;
     applyFastChatGetOptimization();
 
     try {
         const saved = await saveBaibaokuFastConfig({ progressiveChatLoadingEnabled: false });
         settings.progressiveChatLoadingEnabled = false;
-        applyFastChatGetOptimization();
         return saved;
     } catch (error) {
         settings.progressiveChatLoadingEnabled = false;
-        applyFastChatGetOptimization();
         throw error;
     }
 }

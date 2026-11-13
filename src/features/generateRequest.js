@@ -38,4 +38,4 @@ function stripGenerationRequestId(body) {
     return clean;
 }
 
-export { createGenerationRequestId, getCompleteResponseToolName, getGenerationRequestId, markGenerationRequest, stripGenerationRequestId };
+export { GENERATION_REQUEST_ID_KEY, createGenerationRequestId, getCompleteResponseToolName, getGenerationRequestId, markGenerationRequest, stripGenerationRequestId };

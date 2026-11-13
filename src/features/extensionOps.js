@@ -82,6 +82,7 @@ const MAX_LISTED_ITEMS = 30;
 const MAX_DETAIL_CHARS = 800;
 
 const EXTENSION_INSTALL_OPTIMIZATION_STORAGE_KEY = 'bai_bai_toolkit_extension_install_optimization_enabled';
+const EXTENSION_INTERCEPT_RETRY_COOLDOWN_MS = 60_000;
 
 function getExtensionOpsState() {
     if (!extensionState.extensionOps || typeof extensionState.extensionOps !== 'object') {
@@ -98,8 +99,19 @@ function getExtensionOpsState() {
     if (!Number.isInteger(state.openPopups)) {
         state.openPopups = 0;
     }
+    if (!Number.isFinite(state.interceptRetryAfter)) {
+        state.interceptRetryAfter = 0;
+    }
 
     return state;
+}
+
+function readStoredExtensionInterceptEnabled() {
+    try {
+        return localStorage.getItem(EXTENSION_INSTALL_OPTIMIZATION_STORAGE_KEY) === 'true';
+    } catch {
+        return false;
+    }
 }
 
 function setExtensionInterceptEnabled(enabled, { persist = true } = {}) {
@@ -107,6 +119,7 @@ function setExtensionInterceptEnabled(enabled, { persist = true } = {}) {
     const normalized = Boolean(enabled);
     state.interceptChecked = true;
     state.interceptEnabled = normalized;
+    state.interceptRetryAfter = 0;
     if (persist) {
         try {
             localStorage.setItem(EXTENSION_INSTALL_OPTIMIZATION_STORAGE_KEY, String(normalized));
@@ -122,6 +135,9 @@ async function ensureExtensionInterceptEnabled() {
     if (state.interceptChecked === true) {
         return state.interceptEnabled === true;
     }
+    if (state.interceptRetryAfter > Date.now()) {
+        return readStoredExtensionInterceptEnabled();
+    }
     if (state.interceptCheckPromise) {
         return state.interceptCheckPromise;
     }
@@ -134,11 +150,8 @@ async function ensureExtensionInterceptEnabled() {
             if (error?.unsupported) {
                 return setExtensionInterceptEnabled(false, { persist: false });
             }
-            try {
-                return localStorage.getItem(EXTENSION_INSTALL_OPTIMIZATION_STORAGE_KEY) === 'true';
-            } catch {
-                return false;
-            }
+            state.interceptRetryAfter = Date.now() + EXTENSION_INTERCEPT_RETRY_COOLDOWN_MS;
+            return readStoredExtensionInterceptEnabled();
         } finally {
             state.interceptCheckPromise = null;
         }
@@ -325,6 +338,7 @@ function handleOperationResponse(entry, response) {
         const state = getExtensionOpsState();
         state.interceptChecked = false;
         state.interceptEnabled = false;
+        state.interceptRetryAfter = 0;
         untrackOperation(entry);
         return;
     }

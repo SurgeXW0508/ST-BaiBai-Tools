@@ -12,7 +12,6 @@ const LAZY_THEME_CHANGE_GUARD_KEY = '__baiBaiToolkitLazyThemeChangeGuard';
 const RELOAD_GREETING_GUARD_KEY = '__baiBaiToolkitReloadGuard';
 const BAIBAOKU_STATUS_URL = '/api/plugins/baibaoku/v1/status';
 const BAIBAOKU_FAST_CONFIG_URL = '/api/plugins/baibaoku/v1/fast-config';
-const BAIBAOKU_FAST_CHAT_GET_URL = '/api/plugins/baibaoku/v1/chats/fast-get';
 const BAIBAOKU_THEME_GET_URL = '/api/plugins/baibaoku/v1/themes/get';
 const BAIBAOKU_REQUIRED_BACKEND_VERSION = '0.4.3';
 const BAIBAOKU_PRESET_AUTO_BACKUP_MIN_VERSION = '0.4.4';
@@ -80,8 +79,6 @@ const GENERATE_RETRY_REASON_MAX_LENGTH = 60;
 // 配置或提示词本身的问题重发多少次都一样,直接交回酒馆报错;499 是柏宝库的「已取消」。
 const GENERATE_RETRY_PERMANENT_STATUSES = new Set([400, 401, 403, 404, 413, 422, 499]);
 const SAVE_REQUEST_GZIP_FETCH_KEY = '__baiBaiToolkitSaveRequestGzipFetchPatched';
-const FAST_CHAT_GET_FETCH_KEY = '__baiBaiToolkitFastChatGetFetchPatched';
-const FAST_CHAT_GET_JQUERY_TRIGGER_GUARD_KEY = '__baiBaiToolkitFastChatGetJQueryTriggerGuardPatched';
 const PERFORMANCE_TRACE_FETCH_KEY = '__baiBaiToolkitPerformanceTraceFetchPatched';
 const EXTENSION_UPDATE_DIAGNOSTICS_FETCH_KEY = '__baiBaiToolkitExtensionUpdateDiagnosticsFetchPatched';
 const EXTENSION_UPDATE_PATH = '/api/extensions/update';
@@ -258,33 +255,6 @@ const SAVE_REQUEST_GZIP_PATHS = new Set([
     '/api/chats/save',
     '/api/chats/group/save',
 ]);
-const FAST_CHAT_GET_PATHS = new Set([
-    '/api/chats/get',
-    '/api/chats/group/get',
-]);
-const FAST_CHAT_GET_SAVE_PATHS = new Set([
-    '/api/chats/save',
-    '/api/chats/group/save',
-]);
-const FAST_CHAT_GET_DEFAULT_THRESHOLD_BYTES = 2 * 1024 * 1024;
-const FAST_CHAT_GET_DEFAULT_INITIAL_MESSAGES = 5;
-const FAST_CHAT_GET_ACTION_SELECTOR = [
-    '#send_but',
-    '#option_regenerate',
-    '#option_continue',
-    '#option_impersonate',
-    '#option_delete_mes',
-    '#mes_continue',
-    '#mes_impersonate',
-    '#dialogue_del_mes_ok',
-    '#chat .mes_edit',
-    '#chat .mes_edit_done',
-    '#chat .mes_delete',
-    '#chat .del_mes',
-    '#chat .swipe_left',
-    '#chat .swipe_right',
-    '#show_more_messages',
-].join(', ');
 const FAST_SETTINGS_BOOTSTRAP_CACHE_MS = 15_000;
 const PERFORMANCE_TRACE_FETCH_PATHS = new Set([
     '/api/chats/get',
@@ -348,7 +318,6 @@ export {
     AVATAR_LAZY_LOAD_SELECTOR,
     BAIBAOKU_EARLY_BRIDGE_KEY,
     BAIBAOKU_EXTENSIONS_URL,
-    BAIBAOKU_FAST_CHAT_GET_URL,
     BAIBAOKU_FAST_CONFIG_URL,
     BAIBAOKU_PANEL_STATUS_CACHE_MS,
     BAIBAOKU_PRESET_AUTO_BACKUP_MIN_VERSION,
@@ -426,13 +395,6 @@ export {
     EXTENSION_VERSION_CHECK_TIMEOUT_MS,
     EXTENSION_VERSION_PATH,
     FAST_CHARACTER_LIST_FETCH_KEY,
-    FAST_CHAT_GET_ACTION_SELECTOR,
-    FAST_CHAT_GET_DEFAULT_INITIAL_MESSAGES,
-    FAST_CHAT_GET_DEFAULT_THRESHOLD_BYTES,
-    FAST_CHAT_GET_FETCH_KEY,
-    FAST_CHAT_GET_JQUERY_TRIGGER_GUARD_KEY,
-    FAST_CHAT_GET_PATHS,
-    FAST_CHAT_GET_SAVE_PATHS,
     FAST_SETTINGS_BOOTSTRAP_CACHE_MS,
     FAST_SETTINGS_BOOTSTRAP_FETCH_KEY,
     GENERATE_BLACKLIST_SETTLED_EVENT,

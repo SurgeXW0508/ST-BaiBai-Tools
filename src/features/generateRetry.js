@@ -2,7 +2,7 @@
 // share this inner hook so retries never re-run background dispatch.
 // Strip the local request marker here even when automatic retry is disabled.
 import { event_types, eventSource } from '@sillytavern/script';
-import { createGenerationRequestId, getGenerationRequestId, markGenerationRequest, stripGenerationRequestId } from './generateRequest.js';
+import { GENERATION_REQUEST_ID_KEY, createGenerationRequestId, getGenerationRequestId, markGenerationRequest, stripGenerationRequestId } from './generateRequest.js';
 import { BAIBAOKU_SAVE_GENERATE_URL, GENERATE_RETRY_BASE_DELAY_MS, GENERATE_RETRY_DEFAULT_RETRIES, GENERATE_RETRY_FETCH_KEY, GENERATE_RETRY_MAX_DELAY_MS, GENERATE_RETRY_MAX_RETRIES, GENERATE_RETRY_MESSAGE_TYPES, GENERATE_RETRY_MIN_RETRIES, GENERATE_RETRY_PATHS, GENERATE_RETRY_PERMANENT_STATUSES, GENERATE_RETRY_REASON_MAX_LENGTH, LOG_PREFIX } from './constants.js';
 import { getFetchRequestMethod, getFetchRequestUrl, isFetchRequest } from './gzipHook.js';
 import { getGenerationStopEpoch, isCurrentGenerationStopped, subscribeGenerationStop } from './generationLifecycle.js';
@@ -35,7 +35,7 @@ function installGenerateRetryFetchHook() {
         if (!kind) return state.originalFetch(input, init);
 
         if (!isFetchRequest(input)
-            && (init?.body == null || (typeof init.body === 'string' && !init.body.includes('__baibai_generation_id')))) {
+            && (init?.body == null || (typeof init.body === 'string' && !init.body.includes(GENERATION_REQUEST_ID_KEY)))) {
             return state.originalFetch(input, init);
         }
 

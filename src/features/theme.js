@@ -661,13 +661,16 @@ function installThemeApplyScrollTopWriteDeferral(state, prototype) {
     registerScrollTopWriteInterceptor(
         'themeApplyScrollTopDeferral',
         (element, value, originalSet) => {
-            if (!(element instanceof HTMLElement) || element.id !== 'chat' || Date.now() >= state.windowUntil) {
+            if (!(element instanceof HTMLElement)
+                || element.id !== 'chat'
+                || Date.now() >= state.windowUntil
+                || typeof requestAnimationFrame !== 'function') {
                 return false;
             }
 
             state.pendingScrollTop = { element, value };
 
-            if (!state.scrollTopFlushFrame && typeof requestAnimationFrame === 'function') {
+            if (!state.scrollTopFlushFrame) {
                 state.scrollTopFlushFrame = requestAnimationFrame(() => {
                     state.scrollTopFlushFrame = 0;
                     const pending = state.pendingScrollTop;

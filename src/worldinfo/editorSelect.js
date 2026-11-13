@@ -218,42 +218,52 @@ function ensureWorldInfoEditorSelectSearch(select = document.getElementById('wor
     syncWorldInfoEditorSelect2Theme(select);
 }
 
+const WORLD_INFO_CONTROL_THEME_KEYS = [
+    'backgroundColor',
+    'borderBottomColor',
+    'borderBottomLeftRadius',
+    'borderBottomRightRadius',
+    'borderBottomStyle',
+    'borderBottomWidth',
+    'borderLeftColor',
+    'borderLeftStyle',
+    'borderLeftWidth',
+    'borderRightColor',
+    'borderRightStyle',
+    'borderRightWidth',
+    'borderTopColor',
+    'borderTopLeftRadius',
+    'borderTopRightRadius',
+    'borderTopStyle',
+    'borderTopWidth',
+    'boxShadow',
+    'color',
+    'fontFamily',
+    'fontSize',
+    'fontWeight',
+    'height',
+    'lineHeight',
+    'minHeight',
+    'paddingBottom',
+    'paddingLeft',
+    'paddingRight',
+    'paddingTop',
+];
+
 function snapshotControlThemeStyle(style) {
     if (!style) {
         return null;
     }
 
-    return {
-        backgroundColor: style.backgroundColor,
-        borderBottomColor: style.borderBottomColor,
-        borderBottomLeftRadius: style.borderBottomLeftRadius,
-        borderBottomRightRadius: style.borderBottomRightRadius,
-        borderBottomStyle: style.borderBottomStyle,
-        borderBottomWidth: style.borderBottomWidth,
-        borderLeftColor: style.borderLeftColor,
-        borderLeftStyle: style.borderLeftStyle,
-        borderLeftWidth: style.borderLeftWidth,
-        borderRightColor: style.borderRightColor,
-        borderRightStyle: style.borderRightStyle,
-        borderRightWidth: style.borderRightWidth,
-        borderTopColor: style.borderTopColor,
-        borderTopLeftRadius: style.borderTopLeftRadius,
-        borderTopRightRadius: style.borderTopRightRadius,
-        borderTopStyle: style.borderTopStyle,
-        borderTopWidth: style.borderTopWidth,
-        boxShadow: style.boxShadow,
-        color: style.color,
-        fontFamily: style.fontFamily,
-        fontSize: style.fontSize,
-        fontWeight: style.fontWeight,
-        height: style.height,
-        lineHeight: style.lineHeight,
-        minHeight: style.minHeight,
-        paddingBottom: style.paddingBottom,
-        paddingLeft: style.paddingLeft,
-        paddingRight: style.paddingRight,
-        paddingTop: style.paddingTop,
-    };
+    const snapshot = {};
+    for (const key of WORLD_INFO_CONTROL_THEME_KEYS) {
+        snapshot[key] = style[key];
+    }
+    return snapshot;
+}
+
+function getControlThemeStyleSignature(style) {
+    return WORLD_INFO_CONTROL_THEME_KEYS.map(key => `${key}:${style[key] ?? ''}`).join('|');
 }
 
 function forceWorldInfoEditorSelectSearchField(select = document.getElementById('world_editor_select')) {
@@ -315,7 +325,7 @@ function syncWorldInfoEditorSelectDropdownTheme(select, field = document.querySe
         return;
     }
 
-    const styleSignature = `${referenceStyle.backgroundColor}|${referenceStyle.color}|${referenceStyle.borderTopColor}|${referenceStyle.fontSize}|${referenceStyle.height}`;
+    const styleSignature = getControlThemeStyleSignature(referenceStyle);
     if (field.__baiBaiToolkitAppliedDropdownThemeSig === styleSignature) {
         return;
     }

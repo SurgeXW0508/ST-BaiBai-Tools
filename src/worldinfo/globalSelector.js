@@ -29,6 +29,11 @@ function installWorldInfoGlobalSelectorSyncHandler(state = getWorldInfoVueListOp
     }
 
     const handler = (event) => {
+        if (event?.target instanceof Element && event.target.id === 'world_editor_select') {
+            scheduleWorldInfoGlobalSelectorDisplayOnlyRefresh(state);
+            return;
+        }
+
         if (event?.target instanceof Element
             && !event.target.closest('#WIMultiSelector')) {
             return;
@@ -50,6 +55,13 @@ function installWorldInfoGlobalSelectorSyncHandler(state = getWorldInfoVueListOp
 }
 
 function removeWorldInfoGlobalSelectorSyncHandler(state = getWorldInfoVueListOptimizationState()) {
+    if (state.worldInfoGlobalSelectorDisplayRaf) {
+        if (typeof cancelAnimationFrame === 'function') {
+            cancelAnimationFrame(state.worldInfoGlobalSelectorDisplayRaf);
+        }
+        state.worldInfoGlobalSelectorDisplayRaf = 0;
+    }
+
     const handler = state.worldInfoGlobalSelectorSyncHandler;
 
     if (!handler) {
@@ -59,6 +71,33 @@ function removeWorldInfoGlobalSelectorSyncHandler(state = getWorldInfoVueListOpt
     eventSource?.removeListener?.(event_types.WORLDINFO_SETTINGS_UPDATED, handler);
     document.removeEventListener('change', handler, true);
     state.worldInfoGlobalSelectorSyncHandler = null;
+}
+
+function refreshConnectedWorldInfoGlobalSelectorDisplaysOnly(state = getWorldInfoVueListOptimizationState()) {
+    for (const select of Array.from(state.worldInfoGlobalSelectorSelects ?? [])) {
+        if (!select.isConnected) {
+            restoreWorldInfoGlobalSelector(select, state);
+            continue;
+        }
+
+        refreshWorldInfoGlobalSelectorDisplay(select);
+    }
+}
+
+function scheduleWorldInfoGlobalSelectorDisplayOnlyRefresh(state = getWorldInfoVueListOptimizationState()) {
+    if (state.worldInfoGlobalSelectorDisplayRaf) {
+        return;
+    }
+
+    if (typeof requestAnimationFrame !== 'function') {
+        refreshConnectedWorldInfoGlobalSelectorDisplaysOnly(state);
+        return;
+    }
+
+    state.worldInfoGlobalSelectorDisplayRaf = requestAnimationFrame(() => {
+        state.worldInfoGlobalSelectorDisplayRaf = 0;
+        refreshConnectedWorldInfoGlobalSelectorDisplaysOnly(state);
+    });
 }
 
 function syncWorldInfoGlobalSelectorDisplays(state = getWorldInfoVueListOptimizationState()) {
