@@ -23,7 +23,6 @@ function applyWorldInfoListOptimization() {
             removeWorldInfoSearchReplacePanel(state);
         }
         installWorldInfoMobileHeaderLayoutWatcher(state);
-        installWorldInfoMobileLayoutMutationObserver(state);
     } else {
         unmountWorldInfoVueListApp(state);
         restoreWorldInfoVueListPaginationPatch(state);
@@ -210,12 +209,18 @@ function restoreWorldInfoVueListAppendCapturePatch(state = getWorldInfoVueListOp
     state.patchedAppend = null;
 }
 
-async function renderWorldInfoVueListFromNativeCallback(nativeCallback, callbackThis, page, callbackArgs) {
+function renderWorldInfoVueListFromNativeCallback(nativeCallback, callbackThis, page, callbackArgs) {
     const state = getWorldInfoVueListOptimizationState();
-    const previousRender = state.renderQueue || Promise.resolve();
-    const render = previousRender
-        .catch(() => { })
-        .then(() => renderWorldInfoVueListFromNativeCallbackLocked(state, nativeCallback, callbackThis, page, callbackArgs));
+    const renderToken = ++state.renderToken;
+    const runLocked = () => {
+        if (state.renderToken !== renderToken) {
+            return undefined;
+        }
+        return renderWorldInfoVueListFromNativeCallbackLocked(state, renderToken, nativeCallback, callbackThis, page, callbackArgs);
+    };
+    const render = state.renderQueue
+        ? state.renderQueue.catch(() => { }).then(runLocked)
+        : Promise.resolve(runLocked());
     const cleanup = render.finally(() => {
         if (state.renderQueue === cleanup) {
             state.renderQueue = null;
@@ -226,14 +231,12 @@ async function renderWorldInfoVueListFromNativeCallback(nativeCallback, callback
     return render;
 }
 
-async function renderWorldInfoVueListFromNativeCallbackLocked(state, nativeCallback, callbackThis, page, callbackArgs) {
+async function renderWorldInfoVueListFromNativeCallbackLocked(state, renderToken, nativeCallback, callbackThis, page, callbackArgs) {
     const list = document.getElementById('world_popup_entries_list');
 
     if (!settings.worldInfoListOptimizationEnabled || !(list instanceof HTMLElement) || typeof nativeCallback !== 'function') {
         return nativeCallback.call(callbackThis, page, ...callbackArgs);
     }
-
-    unmountWorldInfoVueListApp(state);
 
     const capture = {
         list,
@@ -253,7 +256,7 @@ async function renderWorldInfoVueListFromNativeCallbackLocked(state, nativeCallb
             return result;
         }
 
-        if (state.activeAppendCapture !== capture) {
+        if (state.activeAppendCapture !== capture || state.renderToken !== renderToken) {
             restoreWorldInfoVueListAppendCapturePatch(state);
             return result;
         }
@@ -265,10 +268,10 @@ async function renderWorldInfoVueListFromNativeCallbackLocked(state, nativeCallb
             return result;
         }
 
-        await mountWorldInfoVueListApp(state, list, capture.appendCalls, append);
+        mountWorldInfoVueListApp(state, list, capture.appendCalls, append);
         return result;
     } catch (error) {
-        console.debug(`${LOG_PREFIX} Failed to render World Info Vue list`, error);
+        console.debug(`${LOG_PREFIX} Failed to render World Info list`, error);
         state.activeAppendCapture = null;
         restoreWorldInfoVueListAppendCapturePatch(state);
         appendCapturedWorldInfoListCalls(state, list, capture.appendCalls, append);
@@ -281,40 +284,11 @@ async function renderWorldInfoVueListFromNativeCallbackLocked(state, nativeCallb
     }
 }
 
-async function mountWorldInfoVueListApp(state, list, appendCalls, append) {
-    const vue = await loadWorldInfoVueListModule(state);
-    const renderToken = ++state.renderToken;
-
-    unmountWorldInfoVueListApp(state);
-
+function mountWorldInfoVueListApp(state, list, appendCalls, append) {
     state.root = list;
-    state.app = vue.createApp(createWorldInfoVueListRootComponent(vue, {
-        state,
-        list,
-        appendCalls,
-        append,
-        renderToken,
-    }));
-    state.app.mount(list);
-}
-
-function createWorldInfoVueListRootComponent(vue, context) {
-    return {
-        name: 'BaiBaiWorldInfoVueList',
-        setup() {
-            vue.onMounted(() => {
-                if (context.state.renderToken !== context.renderToken || !settings.worldInfoListOptimizationEnabled) {
-                    return;
-                }
-
-                applyWorldInfoMobileHeaderLayoutsBeforeAppend(context.appendCalls);
-                appendCapturedWorldInfoListCalls(context.state, context.list, context.appendCalls, context.append);
-                refreshWorldInfoVueListAfterAppend(context.list);
-            });
-
-            return () => null;
-        },
-    };
+    applyWorldInfoMobileHeaderLayoutsBeforeAppend(appendCalls);
+    appendCapturedWorldInfoListCalls(state, list, appendCalls, append);
+    refreshWorldInfoVueListAfterAppend(list, state);
 }
 
 // 手机版标题栏趁条目还没插进页面就改好:离线时挪节点很便宜,插进页面后再挪,
@@ -384,54 +358,50 @@ function normalizeWorldInfoAppendArguments(args) {
     return nodes;
 }
 
-function refreshWorldInfoVueListAfterAppend(list) {
+function refreshWorldInfoVueListAfterAppend(list, state = getWorldInfoVueListOptimizationState()) {
     if (settings.worldInfoSearchReplaceEnabled !== false) {
         installWorldInfoSearchReplacePanel();
     } else {
         removeWorldInfoSearchReplacePanel();
     }
-    applyWorldInfoPopupLayout();
-    applyWorldInfoMobileHeaderLayouts(list);
-    applyWorldInfoMobileExpandedLayouts(list);
 
-    list.querySelectorAll('textarea[name="comment"]').forEach(textarea => {
-        if (textarea instanceof HTMLTextAreaElement && !globalThis.CSS?.supports?.('field-sizing', 'content')) {
-            void resetScrollHeight(textarea);
-        }
-    });
+    if (shouldUseWorldInfoMobileHeaderLayout()) {
+        installWorldInfoMobileLayoutMutationObserver(state);
+        applyWorldInfoPopupLayout();
+        applyWorldInfoMobileHeaderLayouts(list);
+        applyWorldInfoMobileExpandedLayouts(list);
+    } else {
+        removeWorldInfoMobileLayoutMutationObserver(state);
+    }
+
+    if (!globalThis.CSS?.supports?.('field-sizing', 'content')) {
+        list.querySelectorAll('textarea[name="comment"]').forEach(textarea => {
+            if (textarea instanceof HTMLTextAreaElement) {
+                void resetScrollHeight(textarea);
+            }
+        });
+    }
 }
 
 function unmountWorldInfoVueListApp(state = getWorldInfoVueListOptimizationState()) {
-    if (!state.app) {
-        return;
-    }
-
-    try {
-        state.app.unmount();
-    } catch (error) {
-        console.debug(`${LOG_PREFIX} Failed to unmount World Info Vue list`, error);
+    if (state.app) {
+        try {
+            state.app.unmount();
+        } catch (error) {
+            console.debug(`${LOG_PREFIX} Failed to unmount World Info Vue list`, error);
+        }
     }
 
     state.app = null;
     state.root = null;
 }
 
-async function loadWorldInfoVueListModule(state = getWorldInfoVueListOptimizationState()) {
-    if (!state.modulePromise) {
-        state.modulePromise = import('vue');
-    }
-
-    return state.modulePromise;
-}
-
 export {
     appendCapturedWorldInfoListCalls,
     applyWorldInfoListOptimization,
-    createWorldInfoVueListRootComponent,
     getWorldInfoVueListOptimizationState,
     installWorldInfoVueListAppendCapturePatch,
     installWorldInfoVueListPaginationPatch,
-    loadWorldInfoVueListModule,
     mountWorldInfoVueListApp,
     normalizeWorldInfoAppendArguments,
     refreshWorldInfoVueListAfterAppend,

@@ -30,8 +30,7 @@ function installWorldInfoGlobalSelectorSyncHandler(state = getWorldInfoVueListOp
 
     const handler = (event) => {
         if (event?.target instanceof Element
-            && !event.target.closest('#WIMultiSelector')
-            && event.target.id !== 'world_editor_select') {
+            && !event.target.closest('#WIMultiSelector')) {
             return;
         }
 

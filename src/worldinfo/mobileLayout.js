@@ -12,14 +12,19 @@ function installWorldInfoMobileHeaderLayoutWatcher(state = getWorldInfoVueListOp
         const list = document.getElementById('world_popup_entries_list');
 
         if (!(list instanceof HTMLElement)) {
+            if (!shouldUseWorldInfoMobileHeaderLayout()) {
+                removeWorldInfoMobileLayoutMutationObserver(state);
+            }
             return;
         }
 
         if (shouldUseWorldInfoMobileHeaderLayout()) {
+            installWorldInfoMobileLayoutMutationObserver(state);
             applyWorldInfoPopupLayout();
             applyWorldInfoMobileHeaderLayouts(list);
             applyWorldInfoMobileExpandedLayouts(list);
         } else {
+            removeWorldInfoMobileLayoutMutationObserver(state);
             restoreWorldInfoPopupLayout();
             restoreWorldInfoMobileExpandedLayouts(list);
             restoreWorldInfoMobileHeaderLayouts(list);
@@ -41,7 +46,7 @@ function installWorldInfoMobileHeaderLayoutWatcher(state = getWorldInfoVueListOp
 }
 
 function installWorldInfoMobileLayoutMutationObserver(state = getWorldInfoVueListOptimizationState()) {
-    if (state.mobileLayoutMutationObserver) {
+    if (state.mobileLayoutMutationObserver || !shouldUseWorldInfoMobileHeaderLayout()) {
         return;
     }
 
@@ -84,6 +89,7 @@ function installWorldInfoMobileLayoutMutationObserver(state = getWorldInfoVueLis
             applyWorldInfoMobileHeaderLayouts(list);
             applyWorldInfoMobileExpandedLayouts(list);
         } else {
+            removeWorldInfoMobileLayoutMutationObserver(state);
             restoreWorldInfoPopupLayout();
             restoreWorldInfoMobileExpandedLayouts(list);
             restoreWorldInfoMobileHeaderLayouts(list);
@@ -141,10 +147,8 @@ function applyWorldInfoMobileExpandedLayouts(root = document) {
         return;
     }
 
-    getWorldInfoEntryElements(root).forEach(entry => {
-        entry.querySelectorAll(':scope .world_entry_edit').forEach(edit => {
-            applyWorldInfoMobileExpandedLayout(edit);
-        });
+    getWorldInfoEntryEditElements(root).forEach(edit => {
+        applyWorldInfoMobileExpandedLayout(edit);
     });
 }
 
@@ -502,10 +506,8 @@ function applyWorldInfoMobileExpandedLayout(edit) {
 }
 
 function restoreWorldInfoMobileExpandedLayouts(root = document) {
-    getWorldInfoEntryElements(root).forEach(entry => {
-        entry.querySelectorAll(':scope .world_entry_edit[data-bai-bai-world-info-mobile-expanded-layout="true"]').forEach(edit => {
-            restoreWorldInfoMobileExpandedLayout(edit);
-        });
+    getWorldInfoEntryEditElements(root, '[data-bai-bai-world-info-mobile-expanded-layout="true"]').forEach(edit => {
+        restoreWorldInfoMobileExpandedLayout(edit);
     });
 }
 
@@ -773,23 +775,42 @@ function applyWorldInfoMobileHeaderLayout(entry) {
 }
 
 function restoreWorldInfoMobileHeaderLayouts(root = document) {
-    getWorldInfoEntryElements(root)
-        .filter(entry => entry.dataset.baiBaiWorldInfoMobileHeaderLayout === 'true')
+    getWorldInfoEntryElements(root, '[data-bai-bai-world-info-mobile-header-layout="true"]')
         .forEach(entry => {
-        restoreWorldInfoMobileHeaderLayout(entry);
-    });
+            restoreWorldInfoMobileHeaderLayout(entry);
+        });
 }
 
-function getWorldInfoEntryElements(root = document) {
-    if (root instanceof HTMLElement && root.matches('#world_popup_entries_list > .world_entry')) {
+function getWorldInfoEntryElements(root = document, extraSelector = '') {
+    if (root instanceof HTMLElement && root.matches(`#world_popup_entries_list > .world_entry${extraSelector}`)) {
         return [root];
     }
 
-    if (root instanceof HTMLElement && root.id === 'world_popup_entries_list') {
-        return Array.from(root.querySelectorAll(':scope > .world_entry'));
+    if (root instanceof HTMLElement && root.matches('#world_popup_entries_list > .world_entry')) {
+        return [];
     }
 
-    return Array.from(root.querySelectorAll?.('#world_popup_entries_list > .world_entry') ?? []);
+    if (root instanceof HTMLElement && root.id === 'world_popup_entries_list') {
+        return Array.from(root.querySelectorAll(`:scope > .world_entry${extraSelector}`));
+    }
+
+    return Array.from(root.querySelectorAll?.(`#world_popup_entries_list > .world_entry${extraSelector}`) ?? []);
+}
+
+function getWorldInfoEntryEditElements(root = document, extraSelector = '') {
+    if (root instanceof HTMLElement && root.matches(`#world_popup_entries_list > .world_entry .world_entry_edit${extraSelector}`)) {
+        return [root];
+    }
+
+    if (root instanceof HTMLElement && root.matches('#world_popup_entries_list > .world_entry')) {
+        return Array.from(root.querySelectorAll(`:scope .world_entry_edit${extraSelector}`));
+    }
+
+    if (root instanceof HTMLElement && root.id === 'world_popup_entries_list') {
+        return Array.from(root.querySelectorAll(`:scope > .world_entry .world_entry_edit${extraSelector}`));
+    }
+
+    return Array.from(root.querySelectorAll?.(`#world_popup_entries_list > .world_entry .world_entry_edit${extraSelector}`) ?? []);
 }
 
 function restoreWorldInfoMobileHeaderLayout(entry) {

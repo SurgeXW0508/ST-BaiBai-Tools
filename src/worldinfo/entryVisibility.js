@@ -23,7 +23,7 @@ function installWorldInfoEntryVisibility(state) {
     // 占位高度不能主动去读:读被跳过条目里的尺寸会临时排版,整个列表跟着重排,一次就几十毫秒。
     // 改成观察条目卡片,条目真正渲染后 ResizeObserver 才回报,被跳过的不回报。
     const resizeObserver = new ResizeObserver((entries, observer) => {
-        measureWorldInfoEntryIntrinsicSize(list, entries, observer);
+        measureWorldInfoEntryIntrinsicSize(state, list, entries, observer);
     });
     const mutationObserver = new MutationObserver((records) => {
         observeWorldInfoEntryCards(resizeObserver, records);
@@ -92,7 +92,7 @@ function getWorldInfoEntryCard(node) {
 
 // 取收起条目卡片的平均高度。量卡片而不是条目本身:条目被跳过时,自身高度就是占位值。
 // 回报时刚排完版,这里读样式不会再触发排版。
-function measureWorldInfoEntryIntrinsicSize(list, entries, observer) {
+function measureWorldInfoEntryIntrinsicSize(state, list, entries, observer) {
     let total = 0;
     let samples = 0;
     let margin = null;
@@ -122,6 +122,9 @@ function measureWorldInfoEntryIntrinsicSize(list, entries, observer) {
     }
 
     observer.disconnect();
+    state.entryVisibilityMutationObserver?.disconnect();
+    state.entryVisibilityMutationObserver = null;
+    state.entryVisibilityResizeObserver = null;
 
     const value = `${Math.ceil(total / samples)}px`;
 

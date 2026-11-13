@@ -14,7 +14,7 @@ function installWorldInfoEditorSelectGrouping(state = getWorldInfoVueListOptimiz
     const openHandler = (event) => {
         const select = getWorldInfoEditorSelectFromOpenEvent(event.target);
 
-        if (!select) {
+        if (!select || globalThis.jQuery?.(select).data?.('select2')) {
             return;
         }
 
@@ -30,7 +30,7 @@ function installWorldInfoEditorSelectGrouping(state = getWorldInfoVueListOptimiz
             ? event.target
             : null;
 
-        if (select) {
+        if (select && !globalThis.jQuery?.(select).data?.('select2')) {
             applyWorldInfoEditorSelectGrouping(state, select);
         }
     };
@@ -218,14 +218,58 @@ function ensureWorldInfoEditorSelectSearch(select = document.getElementById('wor
     syncWorldInfoEditorSelect2Theme(select);
 }
 
+function snapshotControlThemeStyle(style) {
+    if (!style) {
+        return null;
+    }
+
+    return {
+        backgroundColor: style.backgroundColor,
+        borderBottomColor: style.borderBottomColor,
+        borderBottomLeftRadius: style.borderBottomLeftRadius,
+        borderBottomRightRadius: style.borderBottomRightRadius,
+        borderBottomStyle: style.borderBottomStyle,
+        borderBottomWidth: style.borderBottomWidth,
+        borderLeftColor: style.borderLeftColor,
+        borderLeftStyle: style.borderLeftStyle,
+        borderLeftWidth: style.borderLeftWidth,
+        borderRightColor: style.borderRightColor,
+        borderRightStyle: style.borderRightStyle,
+        borderRightWidth: style.borderRightWidth,
+        borderTopColor: style.borderTopColor,
+        borderTopLeftRadius: style.borderTopLeftRadius,
+        borderTopRightRadius: style.borderTopRightRadius,
+        borderTopStyle: style.borderTopStyle,
+        borderTopWidth: style.borderTopWidth,
+        boxShadow: style.boxShadow,
+        color: style.color,
+        fontFamily: style.fontFamily,
+        fontSize: style.fontSize,
+        fontWeight: style.fontWeight,
+        height: style.height,
+        lineHeight: style.lineHeight,
+        minHeight: style.minHeight,
+        paddingBottom: style.paddingBottom,
+        paddingLeft: style.paddingLeft,
+        paddingRight: style.paddingRight,
+        paddingTop: style.paddingTop,
+    };
+}
+
 function forceWorldInfoEditorSelectSearchField(select = document.getElementById('world_editor_select')) {
     if (!(select instanceof HTMLSelectElement) || !globalThis.jQuery?.(select).data?.('select2')) {
         return;
     }
 
     const field = document.querySelector('.select2-container--open .select2-search__field');
+    // Read computed reference style BEFORE mutating any DOM styles to prevent forced synchronous style recalculation.
+    const referenceInput = field instanceof HTMLInputElement ? getWorldInfoEditorSelectSearchReferenceInput() : null;
+    const preReadReferenceStyle = referenceInput instanceof HTMLElement
+        ? snapshotControlThemeStyle(getComputedStyle(referenceInput))
+        : null;
+
     syncWorldInfoEditorSelect2Theme(select);
-    syncWorldInfoEditorSelectDropdownTheme(select, field);
+    syncWorldInfoEditorSelectDropdownTheme(select, field, preReadReferenceStyle);
 
     if (!(field instanceof HTMLInputElement)) {
         return;
@@ -243,7 +287,7 @@ function forceWorldInfoEditorSelectSearchField(select = document.getElementById(
     field.focus({ preventScroll: true });
 }
 
-function syncWorldInfoEditorSelectDropdownTheme(select, field = document.querySelector('.select2-container--open .select2-search__field')) {
+function syncWorldInfoEditorSelectDropdownTheme(select, field = document.querySelector('.select2-container--open .select2-search__field'), preReadStyle = null) {
     if (!(select instanceof HTMLSelectElement)) {
         return;
     }
@@ -259,12 +303,20 @@ function syncWorldInfoEditorSelectDropdownTheme(select, field = document.querySe
         return;
     }
 
-    const referenceInput = getWorldInfoEditorSelectSearchReferenceInput();
-    const referenceStyle = referenceInput instanceof HTMLElement
-        ? getComputedStyle(referenceInput)
-        : select[WORLD_INFO_EDITOR_SELECT_STYLE_KEY];
+    let referenceStyle = preReadStyle;
+    if (!referenceStyle) {
+        const referenceInput = getWorldInfoEditorSelectSearchReferenceInput();
+        referenceStyle = referenceInput instanceof HTMLElement
+            ? snapshotControlThemeStyle(getComputedStyle(referenceInput))
+            : select[WORLD_INFO_EDITOR_SELECT_STYLE_KEY];
+    }
 
     if (!referenceStyle) {
+        return;
+    }
+
+    const styleSignature = `${referenceStyle.backgroundColor}|${referenceStyle.color}|${referenceStyle.borderTopColor}|${referenceStyle.fontSize}|${referenceStyle.height}`;
+    if (field.__baiBaiToolkitAppliedDropdownThemeSig === styleSignature) {
         return;
     }
 
@@ -299,6 +351,7 @@ function syncWorldInfoEditorSelectDropdownTheme(select, field = document.querySe
         paddingRight: referenceStyle.paddingRight,
         paddingTop: referenceStyle.paddingTop,
     });
+    field.__baiBaiToolkitAppliedDropdownThemeSig = styleSignature;
 }
 
 function getWorldInfoEditorSelectSearchReferenceInput() {
@@ -324,38 +377,7 @@ function captureWorldInfoControlTheme(target, source) {
         return;
     }
 
-    const style = getComputedStyle(source);
-    target[WORLD_INFO_EDITOR_SELECT_STYLE_KEY] = {
-        backgroundColor: style.backgroundColor,
-        borderBottomColor: style.borderBottomColor,
-        borderBottomLeftRadius: style.borderBottomLeftRadius,
-        borderBottomRightRadius: style.borderBottomRightRadius,
-        borderBottomStyle: style.borderBottomStyle,
-        borderBottomWidth: style.borderBottomWidth,
-        borderLeftColor: style.borderLeftColor,
-        borderLeftStyle: style.borderLeftStyle,
-        borderLeftWidth: style.borderLeftWidth,
-        borderRightColor: style.borderRightColor,
-        borderRightStyle: style.borderRightStyle,
-        borderRightWidth: style.borderRightWidth,
-        borderTopColor: style.borderTopColor,
-        borderTopLeftRadius: style.borderTopLeftRadius,
-        borderTopRightRadius: style.borderTopRightRadius,
-        borderTopStyle: style.borderTopStyle,
-        borderTopWidth: style.borderTopWidth,
-        boxShadow: style.boxShadow,
-        color: style.color,
-        fontFamily: style.fontFamily,
-        fontSize: style.fontSize,
-        fontWeight: style.fontWeight,
-        height: style.height,
-        lineHeight: style.lineHeight,
-        minHeight: style.minHeight,
-        paddingBottom: style.paddingBottom,
-        paddingLeft: style.paddingLeft,
-        paddingRight: style.paddingRight,
-        paddingTop: style.paddingTop,
-    };
+    target[WORLD_INFO_EDITOR_SELECT_STYLE_KEY] = snapshotControlThemeStyle(getComputedStyle(source));
 }
 
 function syncWorldInfoEditorSelect2Theme(select) {
@@ -372,6 +394,11 @@ function syncWorldInfoEditorSelect2Theme(select) {
     const capturedStyle = select[WORLD_INFO_EDITOR_SELECT_STYLE_KEY];
 
     if (!(selection instanceof HTMLElement) || !capturedStyle) {
+        return;
+    }
+
+    if (selection.__baiBaiToolkitAppliedSelect2Theme === capturedStyle
+        && (!rendered || rendered.__baiBaiToolkitAppliedSelect2Theme === capturedStyle)) {
         return;
     }
 
@@ -406,6 +433,7 @@ function syncWorldInfoEditorSelect2Theme(select) {
     if (isUsableCssSize(capturedStyle.height)) {
         selection.style.height = capturedStyle.height;
     }
+    selection.__baiBaiToolkitAppliedSelect2Theme = capturedStyle;
 
     if (rendered instanceof HTMLElement) {
         Object.assign(rendered.style, {
@@ -426,6 +454,7 @@ function syncWorldInfoEditorSelect2Theme(select) {
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
         });
+        rendered.__baiBaiToolkitAppliedSelect2Theme = capturedStyle;
     }
 
     if (arrow instanceof HTMLElement) {
