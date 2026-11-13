@@ -34,6 +34,11 @@ function installGenerateRetryFetchHook() {
         const kind = getGenerateRetryRequestKind(input, init);
         if (!kind) return state.originalFetch(input, init);
 
+        if (!isFetchRequest(input)
+            && (init?.body == null || (typeof init.body === 'string' && !init.body.includes('__baibai_generation_id')))) {
+            return state.originalFetch(input, init);
+        }
+
         const payload = await readFetchJsonBody(input, init);
         const body = kind === 'save-generate' ? payload?.generate : payload;
         const request = matchGenerateRetryRequest(state, body, kind, init);
@@ -94,6 +99,7 @@ function openGenerateRetryWindow(state, type, dryRun) {
     // ST's token counter also calls Generate; a dry run must not clear the live request.
     if (!state || dryRun) return;
     closeGenerateRetryWindow(state);
+    if (!settings.generateRetryEnabled && !settings.saveGenerateEnabled) return;
     const normalizedType = String(type || 'normal');
     if (!GENERATE_RETRY_MESSAGE_TYPES.has(normalizedType)) return;
     // 停止落在酒馆重建 abortController 之前时,同一代仍会走到这里;不要重新武装。
@@ -117,6 +123,10 @@ function bindGenerateRetryRequestBody(state, body) {
     const active = state?.nativeWindow;
     if (!active || !body || typeof body !== 'object' || Array.isArray(body)) return;
     if (!settings.generateRetryEnabled && !settings.saveGenerateEnabled) return;
+    if (body.chat_completion_source === 'vertexai') {
+        closeGenerateRetryWindow(state);
+        return;
+    }
     // Raw text-completion bodies have no type. Quiet/auxiliary chat completions
     // must not acquire the active main request's identity.
     if (body.type && body.type !== active.type) return;
@@ -128,6 +138,7 @@ function matchGenerateRetryRequest(state, body, kind, init) {
     const active = state?.nativeWindow;
     if (!active?.prepared || getGenerationRequestId(body) !== active.requestId) return null;
     closeGenerateRetryWindow(state);
+    if (body?.chat_completion_source === 'vertexai') return null;
     if (body?.type && body.type !== active.type) return null;
     if (!state.isEnabled()) return null;
     // 武装之后、请求发出之前这一代又被停止(例如控制器已 abort):不再重试。

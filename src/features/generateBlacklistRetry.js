@@ -88,9 +88,15 @@ function findGenerateBlacklistMatch(text, entries) {
     return '';
 }
 
+function isVertexGenerationContext(context) {
+    return context?.mainApi === 'openai'
+        && context?.chatCompletionSettings?.chat_completion_source === 'vertexai';
+}
+
 function isGenerateBlacklistRunCurrent(run, context) {
     return getBlacklistRetryState().run === run
         && settings.generateBlacklistRetryEnabled === true
+        && !isVertexGenerationContext(context)
         && context.chat === run.chat
         && context.characterId === run.characterId
         && context.chatId === run.chatId
@@ -198,8 +204,8 @@ function startGenerateBlacklistRetry(type, options, dryRun) {
     const context = getContext();
     const entries = parseGenerateBlacklist(settings.generateBlacklistRetryText);
     const normalizedType = String(type || 'normal');
-    if (!entries.length || !SUPPORTED_TYPES.has(normalizedType) || context.groupId
-        || context.characterId === undefined || !context.chatId || options?.quietToLoud) {
+    if (!entries.length || !SUPPORTED_TYPES.has(normalizedType) || isVertexGenerationContext(context)
+        || context.groupId || context.characterId === undefined || !context.chatId || options?.quietToLoud) {
         clearStoppedLaunch(state);
         cancelGenerateBlacklistRetry(state.run);
         return;
