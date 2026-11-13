@@ -36,7 +36,7 @@
 2. 对比上游新旧提交与当前个人三库改动，检查与 ST Core、柏宝库的接口、钩子和生命周期一致性，先敲定安全合入方案再动手。
 3. 阅读 [ST canonical maintenance rules](https://github.com/SurgeXW0508/SillyTavern/blob/release/docs/personal-fork/MAINTENANCE_COMPATIBILITY.md)，完成 Capability Ownership Review。特别确认 Save Generate 仍然不装配，不恢复与 ST Core 重叠的生成生命周期或 Vertex Adapter。
 4. 在独立候选分支验证变更。源码有变化时，从锁文件安装依赖，运行受影响测试、`npm run test:personal-stable` 和必要的相邻测试，再执行生产构建 `npm run build`。
-5. `manifest.json` 指向的运行时代码是 `dist/index.js`（浏览器固定挂载在 `/scripts/extensions/third-party/<扩展>/dist/index.js`）。`vite.config.mjs` 已按运行时挂载 URL 与 `manifest.json` 入口固定计算 `@sillytavern/*` 相对层级（`../../../../../`），不再依赖源码检出目录是否位于 `public/` 下（`FX3-1`）；源码修改后必须执行 `npm run build` 与 `npm run test:personal-stable` 核验真实交付入口及 17 个宿主模块导入路径/导出符号，再将正确的 `dist` 与源码一起提交到候选分支，不要只提交 `src` 而遗漏构建产物。
+5. `manifest.json` 指向的运行时入口是 `dist/index.js`（浏览器固定挂载在 `/scripts/extensions/third-party/<扩展>/dist/index.js`，柏宝砚 Shadow Root 样式表按需加载同目录 `dist/index.css`）。`vite.config.mjs` 已按运行时挂载 URL 与 `manifest.json` 入口固定计算 `@sillytavern/*` 相对层级（`../../../../../`），不再依赖源码检出目录是否位于 `public/` 下（`FX3-1`）；源码修改后必须执行 `npm run build` 与 `npm run test:personal-stable` 核验真实交付入口（`dist/index.js`、`dist/index.css`）、17 个静态宿主模块白名单、动态宿主导入（`/scripts/world-info.js`）及异构目录构建字节一致性，再将正确的 `dist` 与源码一起提交到候选分支，不要只提交 `src` 而遗漏构建产物。
 6. 审查通过后，将候选以正常 PR/快进方式推进到 `personal/stable`。不要 force-push、rebase 或重写已被 NAS 跟踪的公开 stable 历史。
 7. 只有用户明确决定部署时，才通过酒馆扩展管理器更新 NAS。
 
@@ -94,13 +94,14 @@ tracking branch = origin/personal/stable
 - 回滚后完整刷新页面，并验证 Save Generate 仍未装配、相邻 ST Core 生成行为没有被改变。
 - 柏宝箱回滚不等于回滚 ST Core 或柏宝库；三个仓库必须按兼容矩阵分别判断。
 
-## 6. 与柏宝库的联动与部署注意
+## 6. 与柏宝库的联动及使用边界
 
-完整能力归属见 [SillyTavern Personal canonical maintenance rules](https://github.com/SurgeXW0508/SillyTavern/blob/release/docs/personal-fork/MAINTENANCE_COMPATIBILITY.md)，日常维护注意以下三处运行期联动：
+完整能力归属见 [SillyTavern Personal canonical maintenance rules](https://github.com/SurgeXW0508/SillyTavern/blob/release/docs/personal-fork/MAINTENANCE_COMPATIBILITY.md)，日常维护与使用注意以下四处运行期边界：
 
 - **扩展路由改写与更新提示**：柏宝箱前端在将 `/api/extensions/*` 请求改写到柏宝库前，会先读取后端扩展管理配置确认 `interceptEnabled` 实际开启；若未安装柏宝库或后端关闭接管，自动回退酒馆原生扩展接口（配置接口发生非 `unsupported` 临时异常时进入 60 秒冷却期并沿用本地缓存状态，避免每次扩展操作重复等待超时）。当后端版本检查不可用时，浏览器兜底更新检查读取个人 Fork `SurgeXW0508/ST-BaiBai-Tools`（`personal/stable`）的 `manifest.json`，不再读取原作者 `main` 以免产生误报。
 - **主题懒加载耦合**：酒馆启动时的主题懒加载由“柏宝库剥离非当前主题 + 柏宝箱按需水合切换主题”共同完成。若在酒馆设置中禁用或移除柏宝箱，请完整刷新页面（柏宝库通过扩展目录 `mtimeMs` 与 30 秒 TTL 校验检测到柏宝箱未启用或已卸载时，会自动回退下发完整主题列表）。
 - **Tokenizer 宏门控与滚动补丁隔离**：与柏宝库配对的 Tokenizer 预热宏跳过规则统一覆盖 `{{...}}` 与旧式 `<USER>/<BOT>/<CHAR>/<CHARIFNOTGROUP>/<GROUP>`（`FX2-2`），单一 `scrollTop` 写入注册表对各拦截器单独做异常隔离（`FX2-3`），详细归属见上述 ST canonical 规范。
+- **内置柏宝砚（新版楼层管理器）使用边界**：副渠道 / 共享渠道（`baibai_api_channels`）的 API Key 明文保存在 `extension_settings` 中，会同步落入同用户目录下的 `settings.json`、设置自动备份与柏宝库 `baibaoku/cache`，日常建议使用低权限或独立限额 Key，导出或分享设置文件前先清理密钥。AI 改写日常推荐使用独立副渠道；若临时选用「跟随主 API」（底层走非流式 `generateRaw` quiet 模式、固定请求 `65535` 输出上限且不支持 `AbortSignal` 中途取消底层请求），配合 Vertex 主渠道时请将酒馆 Vertex `API 版本` 保持在「自动」或 `v1beta1`（锁定 `v1` 时 Argon 等模型非流式超过 `32768` 会返回 HTTP 400）。改写落盘按上游设计直接调用 `saveChat` 并校验楼层原文一致性，不触发 `runOnEdit` 正则；若同时安装并启用独立版 `ST-BaiBai-Pen` / `ST-BaiBai-Inkwell`，内置版会自动让出。
 
 ## 7. 大阶段收口时的部署交接
 
