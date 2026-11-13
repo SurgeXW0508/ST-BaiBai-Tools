@@ -761,11 +761,15 @@ async function prepareOpenAITokenizerBulkMessages(context = {}) {
     return pending;
 }
 
+function containsUnexpandedPromptMacros(value) {
+    return typeof value === 'string' && (value.includes('{{') || /<(?:USER|CHAR|BOT)>/i.test(value));
+}
+
 async function prepareOpenAITokenizerWorldInfoBudgetCounts(context = {}) {
     const state = getOpenAITokenizerBulkState();
     state.stats.worldInfoPrepareCalls += 1;
 
-    if (!isOpenAITokenizerBulkEnabled()) {
+    if (scriptModule.main_api !== 'openai' || !isOpenAITokenizerBulkEnabled()) {
         return false;
     }
 
@@ -839,6 +843,9 @@ function collectOpenAITokenizerWorldInfoBudgetMessages(context = {}) {
         }
 
         const content = typeof entry?.content === 'string' ? entry.content : '';
+        if (entry?.hasMacros || containsUnexpandedPromptMacros(content)) {
+            break;
+        }
         const nextStates = [];
         const seenStates = new Set();
         const pushState = (value) => {
@@ -883,6 +890,10 @@ async function collectOpenAITokenizerBulkMessages(context) {
             return false;
         }
 
+        if (options.skipIfMacros && containsUnexpandedPromptMacros(message?.content)) {
+            return entries.length < OPENAI_TOKENIZER_BULK_PREPARE_MAX_MESSAGES;
+        }
+
         const normalized = normalizeOpenAITokenizerMessage(message, options);
         if (normalized) {
             entries.push(normalized);
@@ -896,9 +907,9 @@ async function collectOpenAITokenizerBulkMessages(context) {
         return entries.length < OPENAI_TOKENIZER_BULK_PREPARE_MAX_MESSAGES;
     };
 
-    await add({ role: 'system', content: context.newChatContent });
-    await add({ role: 'user', content: context.sendIfEmpty });
-    await add({ role: 'system', content: context.newExampleChatContent });
+    await add({ role: 'system', content: context.newChatContent }, { skipIfMacros: true });
+    await add({ role: 'user', content: context.sendIfEmpty }, { skipIfMacros: true });
+    await add({ role: 'system', content: context.newExampleChatContent }, { skipIfMacros: true });
 
     await collectPromptCollectionTokenMessages(context.prompts, add);
     await collectChatHistoryTokenMessages(context, add);
@@ -1031,7 +1042,12 @@ function normalizeOpenAITokenizerMessage(message, { allowEmptyContent = false } 
         return null;
     }
 
-    if (!allowEmptyContent && typeof normalized.content === 'string' && normalized.content.length === 0 && !hasToolCalls && !normalized.name) {
+    // Multimodal array content and tool_calls are not plain strings; delegate to ST native counting.
+    if ((hasContent && typeof normalized.content !== 'string') || hasToolCalls) {
+        return null;
+    }
+
+    if (!allowEmptyContent && normalized.content.length === 0 && !normalized.name) {
         return null;
     }
 
