@@ -42,7 +42,13 @@ function ensureScrollTopPatch(preferredPrototype = null) {
 
     function guardedScrollTopSetter(value) {
         for (let i = 0; i < ordered.length; i++) {
-            if (ordered[i].handler(this, value, originalSet) === true) {
+            let handled = false;
+            try {
+                handled = ordered[i].handler(this, value, originalSet) === true;
+            } catch (error) {
+                console.debug(`[BaiBaiToolkit] scrollTop interceptor "${ordered[i].id}" failed`, error);
+            }
+            if (handled) {
                 return;
             }
         }
