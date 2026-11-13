@@ -1,10 +1,14 @@
 // 柏宝库页的「插件安装优化」开关:只读写柏宝库的 interceptEnabled,代理、镜像等全部由柏宝库自动处理。
 import { LOG_PREFIX } from './constants.js';
-import { fetchExtensionManagerApi } from './extensionOps.js';
+import {
+    EXTENSION_INSTALL_OPTIMIZATION_STORAGE_KEY,
+    fetchExtensionManagerApi,
+    setExtensionInterceptEnabled,
+} from './extensionOps.js';
 
 const EVENT_NAMESPACE = '.baiBaiToolkitExtensionInstallOptimization';
 // 读到后端状态之前先显示上次读到的值(没读过就按后端默认的开),免得每次打开页面开关都从关跳到开
-const LAST_STATE_KEY = 'bai_bai_toolkit_extension_install_optimization_enabled';
+const LAST_STATE_KEY = EXTENSION_INSTALL_OPTIMIZATION_STORAGE_KEY;
 
 function initializeExtensionInstallOptimization(container) {
     const toggle = container.find('#bai_bai_toolkit_extension_install_optimization_enabled');
@@ -49,7 +53,7 @@ async function loadInstallOptimization(toggle) {
         const reason = error?.unsupported
             ? '需要先安装柏宝库(或更新到最新版)。'
             : `读取失败:${error?.message || error}`;
-        applyInstallOptimizationState(toggle, null, reason);
+        applyInstallOptimizationState(toggle, null, reason, Boolean(error?.unsupported));
         console.debug(`${LOG_PREFIX} Failed to load extension install optimization`, error);
     } finally {
         toggle.removeData('busy');
@@ -73,12 +77,18 @@ async function saveInstallOptimization(toggle) {
     }
 }
 
-function applyInstallOptimizationState(toggle, state, reason = '') {
+function applyInstallOptimizationState(toggle, state, reason = '', unsupported = false) {
     const disabledReason = reason || (state && !state.isAdmin ? '只有管理员可以修改这个开关。' : '');
     const label = toggle.closest('label');
     const defaultTitle = label.data('defaultTitle');
     const enabled = Boolean(state) && state.interceptEnabled !== false;
-    localStorage.setItem(LAST_STATE_KEY, String(enabled));
+    if (state) {
+        setExtensionInterceptEnabled(enabled);
+    } else if (unsupported) {
+        setExtensionInterceptEnabled(false, { persist: false });
+    } else {
+        localStorage.setItem(LAST_STATE_KEY, String(enabled));
+    }
 
     toggle.prop('checked', enabled)
         .prop('disabled', Boolean(disabledReason));

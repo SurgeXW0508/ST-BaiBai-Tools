@@ -81,6 +81,8 @@ const MAX_NOTICES = 10;
 const MAX_LISTED_ITEMS = 30;
 const MAX_DETAIL_CHARS = 800;
 
+const EXTENSION_INSTALL_OPTIMIZATION_STORAGE_KEY = 'bai_bai_toolkit_extension_install_optimization_enabled';
+
 function getExtensionOpsState() {
     if (!extensionState.extensionOps || typeof extensionState.extensionOps !== 'object') {
         extensionState.extensionOps = {};
@@ -98,6 +100,51 @@ function getExtensionOpsState() {
     }
 
     return state;
+}
+
+function setExtensionInterceptEnabled(enabled, { persist = true } = {}) {
+    const state = getExtensionOpsState();
+    const normalized = Boolean(enabled);
+    state.interceptChecked = true;
+    state.interceptEnabled = normalized;
+    if (persist) {
+        try {
+            localStorage.setItem(EXTENSION_INSTALL_OPTIMIZATION_STORAGE_KEY, String(normalized));
+        } catch {
+            // ignore storage errors
+        }
+    }
+    return normalized;
+}
+
+async function ensureExtensionInterceptEnabled() {
+    const state = getExtensionOpsState();
+    if (state.interceptChecked === true) {
+        return state.interceptEnabled === true;
+    }
+    if (state.interceptCheckPromise) {
+        return state.interceptCheckPromise;
+    }
+
+    state.interceptCheckPromise = (async () => {
+        try {
+            const config = await fetchExtensionManagerApi('manager/config', { timeoutMs: 5000 });
+            return setExtensionInterceptEnabled(config?.interceptEnabled !== false);
+        } catch (error) {
+            if (error?.unsupported) {
+                return setExtensionInterceptEnabled(false, { persist: false });
+            }
+            try {
+                return localStorage.getItem(EXTENSION_INSTALL_OPTIMIZATION_STORAGE_KEY) !== 'false';
+            } catch {
+                return false;
+            }
+        } finally {
+            state.interceptCheckPromise = null;
+        }
+    })();
+
+    return state.interceptCheckPromise;
 }
 
 function installExtensionOpsFetchHook() {
@@ -119,6 +166,10 @@ function installExtensionOpsFetchHook() {
     hook.wrappedFetch = async function baiBaiToolkitExtensionOpsFetch(input, init) {
         const kind = getOperationKind(input, init);
         if (!kind) {
+            return hook.originalFetch(input, init);
+        }
+
+        if (!(await ensureExtensionInterceptEnabled())) {
             return hook.originalFetch(input, init);
         }
 
@@ -271,6 +322,9 @@ function restorePendingOperations() {
 function handleOperationResponse(entry, response) {
     const opHeader = response?.headers?.get(EXTENSION_OPS_OP_HEADER);
     if (!opHeader) {
+        const state = getExtensionOpsState();
+        state.interceptChecked = false;
+        state.interceptEnabled = false;
         untrackOperation(entry);
         return;
     }
@@ -978,6 +1032,9 @@ async function fetchExtensionManagerApi(path, { method = 'GET', body, timeoutMs 
 }
 
 export {
+    EXTENSION_INSTALL_OPTIMIZATION_STORAGE_KEY,
+    ensureExtensionInterceptEnabled,
     fetchExtensionManagerApi,
     installExtensionOpsFetchHook,
+    setExtensionInterceptEnabled,
 };

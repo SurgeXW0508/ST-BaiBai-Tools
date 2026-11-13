@@ -4,9 +4,11 @@ import { t } from '@sillytavern/scripts/i18n';
 import { callGenericPopup, POPUP_RESULT, POPUP_TYPE } from '@sillytavern/scripts/popup';
 import { isAdmin } from '@sillytavern/scripts/user';
 import { CURRENT_VERSION, EXTENSION_OPS_OP_HEADER, EXTENSION_VERSION_CHECK_TIMEOUT_MS, LOG_PREFIX } from './constants.js';
-import { fetchExtensionManagerApi } from './extensionOps.js';
+import { ensureExtensionInterceptEnabled, fetchExtensionManagerApi } from './extensionOps.js';
 import { EXTENSION_ID, extensionState, settings } from './state.js';
 import { showExtensionUpdateDiagnosis } from './updateDiagnostics.js';
+
+const PERSONAL_STABLE_MANIFEST_URL = 'https://raw.githubusercontent.com/SurgeXW0508/ST-BaiBai-Tools/personal/stable/manifest.json';
 
 function initializeExtensionUpdateCheck() {
     void checkForSilentExtensionUpdate()
@@ -56,22 +58,26 @@ async function runSilentExtensionUpdate() {
 }
 
 /**
- * 先问柏宝库:服务器能自动选直连/代理/镜像线路读远端版本,浏览器连不上 GitHub 也能检查。
- * 没装柏宝库或它检查失败时,退回浏览器直接读 GitHub 上的 manifest。
+ * 先问柏宝库(仅在接管开启时):服务器能自动选直连/代理线路读远端版本,浏览器连不上 GitHub 也能检查。
+ * 未开启柏宝库接管时走酒馆原生 /api/extensions/version,浏览器兜底读取当前安装来源或 personal/stable 的 manifest。
  */
 async function detectExtensionUpdate() {
     const backend = await fetchBaibaokuExtensionVersion();
-    const backendReliable = Boolean(backend?.currentCommitHash) && !backend.baibaoku?.remoteCheckFailed;
-    const remoteVersion = backendReliable ? backend.baibaoku?.remoteManifest?.version : null;
+    const nativeVersion = backend ? null : await fetchNativeExtensionVersion();
+    const versionInfo = backend || nativeVersion;
+    const backendReliable = backend
+        ? Boolean(backend.currentCommitHash) && !backend.baibaoku?.remoteCheckFailed
+        : Boolean(nativeVersion?.currentCommitHash);
+    const remoteVersion = backendReliable ? backend?.baibaoku?.remoteManifest?.version : null;
     if (remoteVersion) {
         return isVersionGreater(remoteVersion, CURRENT_VERSION);
     }
-    if (backendReliable && backend.isUpToDate !== false) {
+    if (backendReliable && versionInfo.isUpToDate !== false) {
         return false;
     }
 
     try {
-        return isVersionGreater(await fetchRemoteManifestVersion(), CURRENT_VERSION);
+        return isVersionGreater(await fetchRemoteManifestVersion(versionInfo), CURRENT_VERSION);
     } catch (error) {
         // 浏览器连不上 GitHub,但服务器已经确认远端有新提交
         if (backendReliable) {
@@ -86,6 +92,9 @@ async function fetchBaibaokuExtensionVersion() {
     if (!type || type === 'system') {
         return null;
     }
+    if (!(await ensureExtensionInterceptEnabled())) {
+        return null;
+    }
 
     try {
         return await fetchExtensionManagerApi('version', {
@@ -98,8 +107,35 @@ async function fetchBaibaokuExtensionVersion() {
     }
 }
 
-async function fetchRemoteManifestVersion() {
-    const remoteManifestUrl = `https://raw.githubusercontent.com/baibai-git/SillyTavern-Mobile-Resize-Guard/main/manifest.json?t=${Date.now()}`;
+async function fetchNativeExtensionVersion() {
+    try {
+        const response = await getCurrentExtensionVersion();
+        if (!response?.ok) {
+            return null;
+        }
+        const data = await response.json().catch(() => null);
+        return data && typeof data === 'object' ? data : null;
+    } catch {
+        return null;
+    }
+}
+
+function resolveRemoteManifestUrl(versionInfo = null) {
+    const remoteUrl = typeof versionInfo?.remoteUrl === 'string' ? versionInfo.remoteUrl.trim() : '';
+    const branch = typeof versionInfo?.currentBranchName === 'string' ? versionInfo.currentBranchName.trim() : '';
+    const match = remoteUrl.match(/^https?:\/\/github\.com\/([^/?#]+)\/([^/?#]+?)(?:\.git)?\/?$/i);
+    if (match && branch && !branch.includes('..') && !/\s/.test(branch)) {
+        const [, owner, repo] = match;
+        const encodedBranch = branch.split('/').filter(Boolean).map(encodeURIComponent).join('/');
+        if (encodedBranch) {
+            return `https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodedBranch}/manifest.json`;
+        }
+    }
+    return PERSONAL_STABLE_MANIFEST_URL;
+}
+
+async function fetchRemoteManifestVersion(versionInfo = null) {
+    const remoteManifestUrl = `${resolveRemoteManifestUrl(versionInfo)}?t=${Date.now()}`;
     const remoteManifestResponse = await fetch(remoteManifestUrl, { cache: 'no-store' });
     if (!remoteManifestResponse.ok) {
         throw new Error(`Failed to fetch remote manifest: ${remoteManifestResponse.statusText}`);
@@ -379,6 +415,7 @@ export {
     promptForExtensionUpdate,
     queueExtensionUpdatePrompt,
     resetUpdateButton,
+    resolveRemoteManifestUrl,
     runExtensionUpdatePrompt,
     runSilentExtensionUpdate,
     setUpdateButtonLoading,
