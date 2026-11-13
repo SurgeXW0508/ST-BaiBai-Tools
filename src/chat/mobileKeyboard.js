@@ -1025,7 +1025,6 @@ export {
     ensureMobileMessageEditScrollGuardMutationObserver,
     focusMobileMessageEditWithoutScroll,
     getActiveMobileMessageEditScrollGuard,
-    getMobileMessageEditScrollTopDescriptorTarget,
     getTextareaCaretContentTop,
     getTextareaNumericLineHeight,
     handleMobileAutoKeyboardFocusIn,

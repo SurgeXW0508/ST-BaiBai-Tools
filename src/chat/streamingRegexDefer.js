@@ -106,7 +106,7 @@ function flushStreamingRegexDeferredRender() {
     }
 
     state.pending = null;
-    if (chat[messageId] !== message) {
+    if (processor.previewFailed === true || chat[messageId] !== message) {
         return;
     }
 

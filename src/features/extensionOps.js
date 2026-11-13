@@ -135,7 +135,7 @@ async function ensureExtensionInterceptEnabled() {
                 return setExtensionInterceptEnabled(false, { persist: false });
             }
             try {
-                return localStorage.getItem(EXTENSION_INSTALL_OPTIMIZATION_STORAGE_KEY) !== 'false';
+                return localStorage.getItem(EXTENSION_INSTALL_OPTIMIZATION_STORAGE_KEY) === 'true';
             } catch {
                 return false;
             }
