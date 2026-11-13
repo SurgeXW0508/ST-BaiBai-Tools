@@ -5,14 +5,44 @@ import { defineConfig } from 'vite';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// 浏览器从 /scripts/extensions/third-party/<插件>/dist/index.js 加载,
-// import 宿主 ST 模块时需要算出从 dist/ 回到 ST public/ 根的相对路径。
-// `@sillytavern/scripts/xxx` -> `../../../../../scripts/xxx.js`,并标为 external,
-// ST 自身的代码不会被打进包里,运行时浏览器直接走相对路径。
-const relative_sillytavern_path = path.relative(
-  path.join(__dirname, 'dist'),
-  __dirname.substring(0, __dirname.lastIndexOf('public') + 'public'.length),
-);
+const package_json = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
+const package_version = String(package_json.version ?? '');
+const manifest_json = JSON.parse(fs.readFileSync(path.join(__dirname, 'manifest.json'), 'utf8'));
+
+// 浏览器固定从 /scripts/extensions/third-party/<插件>/<manifest.js> 加载入口模块。
+// 直接按运行时 URL 层级计算回到酒馆 public/ 根的相对路径,不依赖构建机源码检出位置:
+// 例如 manifest.js 为 `dist/index.js?ver=...` 时,`@sillytavern/scripts/xxx` -> `../../../../../scripts/xxx.js`。
+export function resolveRuntimeSillyTavernRelativePath(manifestJs = manifest_json.js) {
+  const rawEntry = String(manifestJs ?? '')
+    .split(/[?#]/, 1)[0]
+    .replaceAll('\\', '/')
+    .replace(/^\/+/, '');
+  const normalizedEntry = rawEntry ? path.posix.normalize(rawEntry) : '';
+  if (!normalizedEntry || normalizedEntry === '.' || normalizedEntry === '..' || normalizedEntry.startsWith('../')) {
+    throw new Error(`Invalid manifest.json "js" entry path: ${String(manifestJs ?? '')}`);
+  }
+  const runtimeEntryDir = path.posix.dirname(
+    path.posix.join('/scripts/extensions/third-party/_extension_', normalizedEntry),
+  );
+  return path.posix.relative(runtimeEntryDir, '/');
+}
+
+export function resolveSillyTavernImportSpecifier(id, relativeRoot = relative_sillytavern_path) {
+  if (typeof id !== 'string' || !id.startsWith('@sillytavern/')) {
+    return null;
+  }
+  const subpath = id
+    .slice('@sillytavern/'.length)
+    .replaceAll('\\', '/')
+    .replace(/^\/+/, '')
+    .replace(/\.js$/i, '');
+  if (!subpath || subpath === '.' || subpath === '..' || subpath.startsWith('../') || subpath.includes('/../')) {
+    throw new Error(`Invalid @sillytavern import specifier: ${id}`);
+  }
+  return `${path.posix.join(relativeRoot, subpath)}.js`;
+}
+
+const relative_sillytavern_path = resolveRuntimeSillyTavernRelativePath();
 
 // ST 已在全局挂载的第三方库,避免重复打包(本插件目前直接用全局 $/toastr,不 import)。
 const globals = {
@@ -20,9 +50,6 @@ const globals = {
   lodash: '_',
   toastr: 'toastr',
 };
-
-const package_json = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
-const package_version = String(package_json.version ?? '');
 
 export default defineConfig(({ mode }) => ({
   define: {
@@ -38,12 +65,10 @@ export default defineConfig(({ mode }) => ({
       name: 'sillytavern-resolver',
       enforce: 'pre',
       resolveId(id) {
-        if (id.startsWith('@sillytavern/')) {
+        const resolvedHostId = resolveSillyTavernImportSpecifier(id);
+        if (resolvedHostId) {
           return {
-            id:
-              path
-                .join(relative_sillytavern_path, id.replace('@sillytavern/', ''))
-                .replaceAll('\\', '/') + '.js',
+            id: resolvedHostId,
             external: true,
           };
         }
