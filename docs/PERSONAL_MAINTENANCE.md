@@ -30,8 +30,10 @@
 
 ### 上游更新流程
 
+> 酒馆、柏宝箱与柏宝库按三位一体自维护：上游有更新时严禁直接照搬（copy）合并，必须先对照三库自维护改动核验一致性与安全同步边界，设计好合入方案后再实施。
+
 1. 在 GitHub 将原作者 `main` 同步到个人 Fork 的 `main`。只更新镜像分支，不直接影响 NAS。
-2. 对比上游新旧提交，检查与当前 ST Core、柏宝库的接口和生命周期影响。
+2. 对比上游新旧提交与当前个人三库改动，检查与 ST Core、柏宝库的接口、钩子和生命周期一致性，先敲定安全合入方案再动手。
 3. 阅读 [ST canonical maintenance rules](https://github.com/SurgeXW0508/SillyTavern/blob/release/docs/personal-fork/MAINTENANCE_COMPATIBILITY.md)，完成 Capability Ownership Review。特别确认 Save Generate 仍然不装配，不恢复与 ST Core 重叠的生成生命周期或 Vertex Adapter。
 4. 在独立候选分支验证变更。源码有变化时，从锁文件安装依赖，运行受影响测试、`npm run test:personal-stable` 和必要的相邻测试，再执行生产构建 `npm run build`。
 5. `manifest.json` 指向的运行时代码是 `dist/index.js`（浏览器固定挂载在 `/scripts/extensions/third-party/<扩展>/dist/index.js`）。`vite.config.mjs` 已按运行时挂载 URL 与 `manifest.json` 入口固定计算 `@sillytavern/*` 相对层级（`../../../../../`），不再依赖源码检出目录是否位于 `public/` 下（`FX3-1`）；源码修改后必须执行 `npm run build` 与 `npm run test:personal-stable` 核验真实交付入口及 17 个宿主模块导入路径/导出符号，再将正确的 `dist` 与源码一起提交到候选分支，不要只提交 `src` 而遗漏构建产物。
@@ -100,13 +102,13 @@ tracking branch = origin/personal/stable
 - **主题懒加载耦合**：酒馆启动时的主题懒加载由“柏宝库剥离非当前主题 + 柏宝箱按需水合切换主题”共同完成。若在酒馆设置中禁用或移除柏宝箱，请完整刷新页面（柏宝库通过扩展目录 `mtimeMs` 与 30 秒 TTL 校验检测到柏宝箱未启用或已卸载时，会自动回退下发完整主题列表）。
 - **Tokenizer 宏门控与滚动补丁隔离**：与柏宝库配对的 Tokenizer 预热宏跳过规则统一覆盖 `{{...}}` 与旧式 `<USER>/<BOT>/<CHAR>/<CHARIFNOTGROUP>/<GROUP>`（`FX2-2`），单一 `scrollTop` 写入注册表对各拦截器单独做异常隔离（`FX2-3`），详细归属见上述 ST canonical 规范。
 
-## 7. 代码任务结束时的部署交接
+## 7. 大阶段收口时的部署交接
 
-凡任务修改了柏宝箱 Runtime、构建产物、依赖或与 ST/柏宝库的集成，完成实现、测试和独立审查后，必须在交接结尾明确：
+仅在**大阶段或完整大功能节点完成实现、测试与审查并具备部署评估条件**（或用户主动询问部署）时，在交接结尾明确：
 
-1. 本次变更是否影响 NAS Runtime；纯文档/测试变更应明确说明无需更新 NAS。
+1. 本次变更是否影响 NAS Runtime；若整项独立任务仅为文档/测试变更，简要说明无需更新 NAS 即可。
 2. 变更是否已进入 `personal/stable`；若尚未进入，不能声称可以直接部署。
 3. 当前 NAS 预计从哪个 commit 更新到哪个 commit，以及该差异是否包含 Runtime/`dist` 变化。
-4. 主动询问用户是否现在更新 NAS；如果确认，给出通过酒馆扩展管理器更新和完整刷新页面的步骤。
+4. 询问用户是否现在更新 NAS；如果确认，给出通过酒馆扩展管理器更新和完整刷新页面的步骤。
 
-只提供更新建议，不自动更新 NAS、不自动重启或修改生产环境；必须取得用户明确授权后才能执行部署操作。
+在中间讨论、小功能子步骤、候选修复迭代或用户已明确延后统一发布的阶段内，无需机械重复附带上述部署提示。任何情况下只提供更新建议，不自动更新 NAS、不自动重启或修改生产环境；必须取得用户明确授权后才能执行部署操作。
