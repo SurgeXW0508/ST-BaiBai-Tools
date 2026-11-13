@@ -186,10 +186,35 @@ function readSharedChannels(): SharedChannelsStore | null {
   return readStore(getContext()?.extensionSettings?.[SHARED_CHANNELS_KEY]);
 }
 
+let waitTimer = 0;
+let waitResolve: (() => void) | null = null;
+
+function clearPendingWait(): void {
+  if (waitTimer && typeof window !== 'undefined') {
+    window.clearTimeout(waitTimer);
+  }
+  waitTimer = 0;
+  const resolve = waitResolve;
+  waitResolve = null;
+  resolve?.();
+}
+
+function sleepAbortable(ms: number, runId: number): Promise<boolean> {
+  if (runId !== initRunId) return Promise.resolve(false);
+  return new Promise<boolean>(resolve => {
+    waitResolve = () => resolve(runId === initRunId);
+    waitTimer = window.setTimeout(() => {
+      waitTimer = 0;
+      waitResolve = null;
+      resolve(runId === initRunId);
+    }, ms);
+  });
+}
+
 function persistSharedChannels(dispatch = true): void {
   const ctx = getContext();
   if (!ctx?.extensionSettings) return;
-  revision += 1;
+  revision = Math.max(revision, readSharedChannels()?.revision ?? 0) + 1;
   const store: SharedChannelsStore = {
     schemaVersion: SHARED_CHANNELS_SCHEMA_VERSION,
     revision,
@@ -266,6 +291,7 @@ function bindSharedListener(): void {
 
 export function teardownSharedChannels(): void {
   initRunId += 1;
+  clearPendingWait();
   if (listenerBound && typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
     window.removeEventListener(SHARED_CHANNELS_EVENT, handleSharedChannelsEvent);
   }
@@ -290,11 +316,12 @@ function versionLessThan(current: string, required: string): boolean {
   return false;
 }
 
-async function waitForContext(): Promise<STContext | null> {
+async function waitForContext(runId = initRunId): Promise<STContext | null> {
   for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (runId !== initRunId) return null;
     const ctx = getContext();
     if (ctx?.extensionSettings) return ctx;
-    await new Promise(resolve => window.setTimeout(resolve, 250));
+    if (!(await sleepAbortable(250, runId))) return null;
   }
   return null;
 }
@@ -307,11 +334,12 @@ function currentBookApi(): BookApi | null {
   ).STBaiBaiBook ?? null;
 }
 
-async function waitForBookApi(): Promise<BookApi | null> {
+async function waitForBookApi(runId = initRunId): Promise<BookApi | null> {
   for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (runId !== initRunId) return null;
     const api = currentBookApi();
     if (api) return api;
-    await new Promise(resolve => window.setTimeout(resolve, 250));
+    if (!(await sleepAbortable(250, runId))) return null;
   }
   return null;
 }

@@ -104,7 +104,7 @@ export function bindEditButtons(): void {
         syncButtons();
       });
     });
-    observer.observe(chat, { childList: true, subtree: true, attributes: true });
+    observer.observe(chat, { childList: true, subtree: true });
     syncButtons();
     return true;
   };

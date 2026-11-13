@@ -248,37 +248,9 @@ async function setBaibaokuTokenizerBulkCountEnabled(enabled) {
     }
 }
 
-async function setBaibaokuChatKeyboardScanReductionEnabled(enabled) {
-    const next = Boolean(enabled);
-    const previous = settings.chatKeyboardScanReductionEnabled !== false;
-    settings.chatKeyboardScanReductionEnabled = next;
-
-    const bridge = getBaibaokuEarlyBridge();
-    if (typeof bridge?.setChatKeyboardScanReductionEnabled === 'function') {
-        bridge.setChatKeyboardScanReductionEnabled(next);
-    } else if (bridge) {
-        bridge.chatKeyboardScanReductionEnabled = next;
-    }
-
-    try {
-        const saved = await saveBaibaokuFastConfig({ chatKeyboardScanReductionEnabled: next });
-        const savedEnabled = saved.chatKeyboardScanReductionEnabled !== false;
-        settings.chatKeyboardScanReductionEnabled = savedEnabled;
-        if (typeof bridge?.setChatKeyboardScanReductionEnabled === 'function') {
-            bridge.setChatKeyboardScanReductionEnabled(savedEnabled);
-        } else if (bridge) {
-            bridge.chatKeyboardScanReductionEnabled = savedEnabled;
-        }
-        return saved;
-    } catch (error) {
-        settings.chatKeyboardScanReductionEnabled = previous;
-        if (typeof bridge?.setChatKeyboardScanReductionEnabled === 'function') {
-            bridge.setChatKeyboardScanReductionEnabled(previous);
-        } else if (bridge) {
-            bridge.chatKeyboardScanReductionEnabled = previous;
-        }
-        throw error;
-    }
+async function setBaibaokuChatKeyboardScanReductionEnabled() {
+    settings.chatKeyboardScanReductionEnabled = false;
+    return { chatKeyboardScanReductionEnabled: false };
 }
 
 async function setBaibaokuExtensionManifestBundleEnabled(enabled) {

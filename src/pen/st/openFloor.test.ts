@@ -56,6 +56,50 @@ describe('floor access without rendered messages', () => {
     expect(getFloorSourceText(0)).toBe('编辑器中的正文');
   });
 
+  it('opens a floor with active #curEditTextarea text so trimmed native edits never false-trip floor-changed', async () => {
+    const editor = { value: '酒馆编辑框中已去空白的正文' };
+    let editorOpen = true;
+    const cancel = {
+      click: vi.fn(() => {
+        editorOpen = false;
+      }),
+    };
+    const messageElement = {
+      querySelector: vi.fn((selector: string) => {
+        if (selector === '#curEditTextarea') return editorOpen ? editor : null;
+        if (selector === '.mes_edit_cancel') return cancel;
+        return null;
+      }),
+    };
+    const message = {
+      name: '角色',
+      is_user: false,
+      is_system: false,
+      mes: '  酒馆编辑框中已去空白的正文  ',
+      swipes: ['  酒馆编辑框中已去空白的正文  '],
+      swipe_id: 0,
+    };
+    vi.stubGlobal('window', {
+      SillyTavern: {
+        getContext: () => ({
+          chat: [message],
+          getCurrentChatId: () => 'chat-a',
+          saveChat: vi.fn(async () => undefined),
+        }),
+      },
+    });
+    vi.stubGlobal('document', {
+      querySelector: vi.fn(() => messageElement),
+    });
+
+    expect(openFloorInPen(0)).toBe(true);
+    expect(ui.originalText).toBe('酒馆编辑框中已去空白的正文');
+    await expect(
+      applyFloorText(0, ui.originalText, '修订后正文', ui.chatId, ui.chatIdentity),
+    ).resolves.toBe('saved');
+    expect(message.mes).toBe('修订后正文');
+  });
+
   it('persists before refreshing the message and emitting update events', async () => {
     const actions: string[] = [];
     const emit = vi.fn(async (event: string) => {
@@ -102,18 +146,20 @@ describe('floor access without rendered messages', () => {
     expect(actions).toEqual(['save', 'edited', 'refresh', 'updated']);
   });
 
-  it('settles an active ST editor without flattening HTML or line breaks', async () => {
+  it('settles an active ST editor without flattening HTML or line breaks, and falls back to refresh if cancel leaves textarea open', async () => {
     const actions: string[] = [];
     const nextText = '<section>\n\n  <p>保留格式</p>\n</section>';
     const editor = { value: '原文' };
+    let editorOpen = true;
     const cancel = {
       click: vi.fn(() => {
         actions.push('cancel');
+        editorOpen = false;
       }),
     };
     const messageElement = {
       querySelector: vi.fn((selector: string) => {
-        if (selector === '#curEditTextarea') return editor;
+        if (selector === '#curEditTextarea') return editorOpen ? editor : null;
         if (selector === '.mes_edit_cancel') return cancel;
         return null;
       }),
@@ -158,6 +204,17 @@ describe('floor access without rendered messages', () => {
     expect(emit).toHaveBeenCalledOnce();
     expect(emit).toHaveBeenCalledWith('edited', 0);
     expect(actions).toEqual(['save', 'edited', 'cancel']);
+
+    // 当 .mes_edit_cancel 未能关闭原生编辑框（如 this_edit_mes_id 失步）时，必须退回 refreshRenderedMessage
+    actions.length = 0;
+    editorOpen = true;
+    editor.value = nextText;
+    cancel.click.mockImplementationOnce(() => {
+      actions.push('cancel-noop');
+    });
+    await expect(applyFloorText(0, nextText, '回退刷新正文', 'chat-a')).resolves.toBe('saved');
+    expect(updateMessageBlock).toHaveBeenCalledOnce();
+    expect(actions).toEqual(['save', 'edited', 'cancel-noop', 'refresh', 'updated']);
   });
 
   it('keeps a synchronized editor intact when an older ST has no cancel button', async () => {

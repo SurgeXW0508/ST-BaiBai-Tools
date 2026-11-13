@@ -278,8 +278,9 @@ watch(
 );
 
 watch(
-  () => channels.map(channel => channel.id),
-  ids => {
+  () => [sharingState.ready, channels.map(channel => channel.id)] as const,
+  ([ready, ids]) => {
+    if (!ready) return;
     if (penSettings.defaultChannelId && !ids.includes(penSettings.defaultChannelId)) {
       penSettings.defaultChannelId = ids[0] ?? '';
     }
@@ -646,9 +647,12 @@ function enterFloor(floor: number): void {
 }
 
 const floorActionBusy = ref(false);
+const chatMutationBusy = computed(
+  () => saving.value || replacing.value || floorActionBusy.value,
+);
 
 async function onToggleFloorHidden(floor: number): Promise<void> {
-  if (floorActionBusy.value) return;
+  if (chatMutationBusy.value) return;
   floorActionBusy.value = true;
   try {
     const nowHidden = await toggleFloorHidden(floor);
@@ -663,22 +667,36 @@ async function onToggleFloorHidden(floor: number): Promise<void> {
 }
 
 async function onDeleteFloor(floor: number): Promise<void> {
-  if (floorActionBusy.value) return;
+  if (chatMutationBusy.value) return;
   floorActionBusy.value = true;
   const targetIdentity = getOpenChatIdentity();
   try {
-    const deleted = await deleteFloorsFrom(floor);
-    if (!deleted) return;
+    const { deletedCount, effectiveStartFloor } = await deleteFloorsFrom(floor);
+    if (!deletedCount) return;
     // 被删范围包含当前正在改写的楼层时,工作区内容已失效,一并清掉
     if (
       ui.floor != null &&
-      ui.floor >= floor &&
+      ui.floor >= effectiveStartFloor &&
       (!ui.chatIdentity || ui.chatIdentity === targetIdentity)
     ) {
       clearActiveFloorState();
+      if (ui.page === 'workspace') {
+        ui.page = 'floors';
+      }
+    }
+    if (
+      generationTask.value &&
+      (!targetIdentity || generationTask.value.chatIdentity === targetIdentity) &&
+      generationTask.value.floor >= effectiveStartFloor
+    ) {
+      discardGenerationTask(generationTask.value.id);
     }
     refreshFloorRows();
-    showToast(`已删除第 ${floor} 层及之后 ${deleted} 层`);
+    showToast(
+      effectiveStartFloor < floor
+        ? `已删除第 ${effectiveStartFloor} 层（含关联工具记录）及之后共 ${deletedCount} 层`
+        : `已删除第 ${floor} 层及之后 ${deletedCount} 层`,
+    );
   } catch (error) {
     refreshFloorRows();
     showToast(error instanceof Error ? error.message : '删除失败');
@@ -809,6 +827,7 @@ let chatChangedHandler: (() => void) | null = null;
 let chatChangedEvent: unknown;
 let presetChangedEvent: unknown;
 let chatChangedTimer = 0;
+let eventBindTimer = 0;
 let toastTimer = 0;
 let modelMenuTimer = 0;
 const refreshHideScripts = () => {
@@ -822,12 +841,13 @@ watch(
   },
 );
 
-onMounted(() => {
+function tryBindStEvents(): boolean {
+  if (boundEventSource) return true;
   const context = getContext();
   currentChatIdentity.value = getOpenChatIdentity(context);
   const event = context?.eventTypes?.CHAT_CHANGED;
   const on = context?.eventSource?.on;
-  if (!event || typeof on !== 'function' || !context?.eventSource) return;
+  if (!event || typeof on !== 'function' || !context?.eventSource) return false;
   boundEventSource = context.eventSource;
   chatChangedEvent = event;
   chatChangedHandler = () => {
@@ -843,13 +863,28 @@ onMounted(() => {
   on.call(context.eventSource, event, chatChangedHandler);
   presetChangedEvent = context.eventTypes?.OAI_PRESET_CHANGED_AFTER;
   if (presetChangedEvent) on.call(context.eventSource, presetChangedEvent, refreshHideScripts);
+  return true;
+}
+
+onMounted(() => {
+  if (tryBindStEvents()) return;
+  let attempts = 0;
+  eventBindTimer = window.setInterval(() => {
+    attempts += 1;
+    if (tryBindStEvents() || attempts >= 40) {
+      window.clearInterval(eventBindTimer);
+      eventBindTimer = 0;
+    }
+  }, 250);
 });
 
 onUnmounted(() => {
+  window.clearInterval(eventBindTimer);
   window.clearTimeout(floorSearchTimer);
   window.clearTimeout(chatChangedTimer);
   window.clearTimeout(toastTimer);
   window.clearTimeout(modelMenuTimer);
+  eventBindTimer = 0;
   floorSearchTimer = 0;
   chatChangedTimer = 0;
   toastTimer = 0;
@@ -868,10 +903,11 @@ onUnmounted(() => {
   boundEventSource = null;
   chatChangedHandler = null;
   generationTask.value?.controller.abort();
+  generationTask.value = null;
 });
 
 async function startReview(): Promise<void> {
-  if (generationTask.value || saving.value || replacing.value) return;
+  if (generationTask.value || chatMutationBusy.value) return;
   if (!hasInstructions.value) {
     showToast('请先添加行标注或整体要求');
     return;
@@ -1081,7 +1117,7 @@ const editDirty = computed(() =>
 /* 手动保存:只把改过的段落交给 applyParagraphReplacements,未动行的空白/缩进原样保留;
    段落清空即删除该行(与审阅页接受「删除行」同一语义) */
 async function saveManualEdit(): Promise<void> {
-  if (saving.value || replacing.value || generating.value || viewingGenerationTarget.value) return;
+  if (chatMutationBusy.value || generating.value || viewingGenerationTarget.value) return;
   if (ui.floor == null) {
     showToast('当前楼层不可用');
     return;
@@ -1202,7 +1238,7 @@ const applyButtonLabel = computed(() => {
 });
 
 async function finishReview(): Promise<void> {
-  if (generating.value || saving.value || replacing.value) return;
+  if (generating.value || chatMutationBusy.value) return;
   if (ui.floor == null || !rewriteChanges.value.length) return;
   if (acceptedCount.value === 0) {
     closePen();
@@ -1215,6 +1251,12 @@ async function finishReview(): Promise<void> {
       .map(change => [change.paragraph, editedResults.value[change.paragraph] ?? change.replacement] as const),
   );
   const nextText = applyParagraphReplacements(ui.originalText, accepted);
+  if (!nextText.trim()) {
+    const msg = '不能把楼层保存为空';
+    generationError.value = msg;
+    showToast(msg);
+    return;
+  }
   const targetFloor = ui.floor;
 
   generationError.value = '';
@@ -1422,13 +1464,17 @@ const quickReplacement = ref('');
 const quickIsRegex = ref(false);
 
 async function applyReplacement(result: ReplacementResult): Promise<void> {
-  if (replacing.value || viewingGenerationTarget.value || saving.value) return;
+  if (chatMutationBusy.value || viewingGenerationTarget.value) return;
   if (ui.floor == null) {
     showToast('当前楼层不可用');
     return;
   }
   if (!result.count || result.text === ui.originalText) {
     showToast(result.count ? '替换后内容没有变化' : '当前楼层没有匹配内容');
+    return;
+  }
+  if (!result.text.trim()) {
+    showToast('不能把楼层保存为空');
     return;
   }
 
@@ -1650,7 +1696,7 @@ function onOverlayClick(event: MouseEvent): void {
                     type="button"
                     class="bby-seg"
                     :class="{ 'is-on': workMode === 'annotate' }"
-                    :disabled="generating || saving || replacing"
+                    :disabled="generating || chatMutationBusy"
                     @click="setWorkMode('annotate')"
                   >
                     标注
@@ -1659,7 +1705,7 @@ function onOverlayClick(event: MouseEvent): void {
                     type="button"
                     class="bby-seg"
                     :class="{ 'is-on': workMode === 'multi' }"
-                    :disabled="generating || viewingGenerationTarget || saving || replacing"
+                    :disabled="generating || viewingGenerationTarget || chatMutationBusy"
                     @click="setWorkMode('multi')"
                   >
                     多选
@@ -1668,7 +1714,7 @@ function onOverlayClick(event: MouseEvent): void {
                     type="button"
                     class="bby-seg"
                     :class="{ 'is-on': workMode === 'edit' }"
-                    :disabled="generating || viewingGenerationTarget || saving || replacing"
+                    :disabled="generating || viewingGenerationTarget || chatMutationBusy"
                     @click="setWorkMode('edit')"
                   >
                     <Icon name="pen" /> 编辑
@@ -1759,7 +1805,7 @@ function onOverlayClick(event: MouseEvent): void {
                         <button
                           class="bby-button bby-primary bby-btn-sm"
                           type="button"
-                          :disabled="replacing || viewingGenerationTarget || saving || !quickFind"
+                          :disabled="chatMutationBusy || viewingGenerationTarget || !quickFind"
                           @click="runQuickReplace"
                         >
                           <Icon name="replace" /> {{ replacing ? '替换中…' : '替换' }}
@@ -1810,7 +1856,7 @@ function onOverlayClick(event: MouseEvent): void {
                         <button
                           class="bby-button bby-btn-sm"
                           type="button"
-                          :disabled="replacing || viewingGenerationTarget || saving || !enabledRuleCount"
+                          :disabled="chatMutationBusy || viewingGenerationTarget || !enabledRuleCount"
                           @click="runReplace"
                         >
                           <Icon name="replace" /> {{ replacing ? '执行中…' : '执行规则' }}
@@ -2045,13 +2091,13 @@ function onOverlayClick(event: MouseEvent): void {
                   </button>
                   <template v-if="ui.stage === 'annotate'">
                     <template v-if="workMode === 'edit'">
-                      <button class="bby-button" type="button" :disabled="saving || replacing" @click="discardManualEdit">
+                      <button class="bby-button" type="button" :disabled="chatMutationBusy" @click="discardManualEdit">
                         <Icon name="undo" /> 放弃修改
                       </button>
                       <button
                         class="bby-button bby-primary"
                         type="button"
-                        :disabled="saving || replacing || generating || !editDirty"
+                        :disabled="chatMutationBusy || generating || !editDirty"
                         @click="saveManualEdit"
                       >
                         <Icon name="check" /> {{ saving ? '保存中…' : '保存到楼层' }}
@@ -2074,7 +2120,7 @@ function onOverlayClick(event: MouseEvent): void {
                       v-else
                       class="bby-button bby-primary"
                       type="button"
-                      :disabled="generating || replacing || !hasInstructions"
+                      :disabled="generating || chatMutationBusy || !hasInstructions"
                       @click="startReview"
                     >
                       <Icon :name="viewingGenerationTarget ? 'refresh' : 'bolt'" :class="{ 'bby-spin': viewingGenerationTarget }" />
@@ -2082,10 +2128,10 @@ function onOverlayClick(event: MouseEvent): void {
                     </button>
                   </template>
                   <template v-else>
-                    <button class="bby-button" type="button" :disabled="generating || replacing" @click="startReview">
+                    <button class="bby-button" type="button" :disabled="generating || chatMutationBusy" @click="startReview">
                       <Icon name="refresh" :class="{ 'bby-spin': viewingGenerationTarget }" /> {{ generationButtonLabel }}
                     </button>
-                    <button class="bby-button bby-primary" type="button" :disabled="generating || saving || replacing" @click="finishReview">
+                    <button class="bby-button bby-primary" type="button" :disabled="generating || chatMutationBusy" @click="finishReview">
                       <Icon :name="acceptedCount === 0 ? 'trash' : 'check'" />
                       {{ applyButtonLabel }}
                     </button>
@@ -2181,7 +2227,7 @@ function onOverlayClick(event: MouseEvent): void {
                               class="bby-floor-action"
                               type="button"
                               :title="row.hidden ? '显示楼层' : '隐藏楼层'"
-                              :disabled="floorActionBusy"
+                              :disabled="chatMutationBusy"
                               @click.stop="onToggleFloorHidden(row.floor)"
                             >
                               <Icon :name="row.hidden ? 'eyeOff' : 'eye'" />
@@ -2190,7 +2236,7 @@ function onOverlayClick(event: MouseEvent): void {
                               class="bby-floor-action"
                               type="button"
                               title="删除该层及之后楼层"
-                              :disabled="floorActionBusy"
+                              :disabled="chatMutationBusy"
                               @click.stop="onDeleteFloor(row.floor)"
                             >
                               <Icon name="trash" />

@@ -36,8 +36,10 @@ function settleActiveEditor(floor: number, text: string): boolean {
   if (!message || !editor) return false;
 
   editor.value = text;
-  message.querySelector<HTMLElement>('.mes_edit_cancel')?.click();
-  return true;
+  const cancelButton = message.querySelector<HTMLElement>('.mes_edit_cancel');
+  if (!cancelButton) return true;
+  cancelButton.click();
+  return !message.querySelector('#curEditTextarea');
 }
 
 export function getFloorSourceText(floor: number): string | null {
@@ -46,14 +48,14 @@ export function getFloorSourceText(floor: number): string | null {
   return activeEditorText(floor) ?? message.mes ?? '';
 }
 
-/** 从楼层列表直接读取聊天数据，不要求该楼层已经渲染到 DOM。 */
+/** 从楼层列表读取当前楼层源文本（若正处于 ST 原生编辑态则对齐编辑框文本），不要求该楼层已经渲染到 DOM。 */
 export function openFloorInPen(floor: number): boolean {
   const context = getContext();
   const chatMessage = context?.chat?.[floor];
   if (!context || !chatMessage) return false;
 
   openPen(
-    chatMessage.mes ?? '',
+    getFloorSourceText(floor) ?? chatMessage.mes ?? '',
     floor,
     chatMessage.name || (chatMessage.is_user ? '你' : 'AI'),
     getOpenChatId(context),

@@ -74,31 +74,61 @@ export function filterExcludeParams(raw: unknown): string[] {
   return sanitizeExcludeParams(raw).allowed;
 }
 
+function parseSideChannelBaseUrl(
+  rawUrl: string,
+  options?: { appendDefaultV1?: boolean },
+): string {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) {
+    throw new Error('请先填写副 API 地址');
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error('副 API 地址无效，请填写以 http:// 或 https:// 开头的完整地址');
+  }
+
+  if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !parsed.hostname) {
+    throw new Error('副 API 地址必须使用 http:// 或 https:// 协议');
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('副 API 地址不能包含用户名或密码凭据');
+  }
+  if (parsed.search) {
+    throw new Error('副 API 地址不能包含查询参数（?…）');
+  }
+  if (parsed.hash) {
+    throw new Error('副 API 地址不能包含锚点片段（#…）');
+  }
+
+  const rawPathname = parsed.pathname.replace(/\/+$/, '');
+  const hadEndpointSuffix = /\/(?:chat\/completions|models)$/i.test(rawPathname);
+  let pathname = rawPathname
+    .replace(/\/(?:chat\/completions|models)$/i, '')
+    .replace(/\/+$/, '');
+
+  if (!pathname && !hadEndpointSuffix && options?.appendDefaultV1 !== false) {
+    pathname = '/v1';
+  }
+
+  return `${parsed.origin}${pathname}`;
+}
+
 export function normalizeSideChannelBaseUrl(url: string): string {
-  const value = url.trim().replace(/\/+$/, '');
-  if (!value) return '';
-  if (/\/chat\/completions$/i.test(value)) return value.replace(/\/chat\/completions$/i, '');
-  if (/^https?:\/\/[^/?#]+$/i.test(value)) return `${value}/v1`;
-  return value;
+  if (!url.trim()) return '';
+  return parseSideChannelBaseUrl(url, { appendDefaultV1: true });
 }
 
 /**
  * 校验并返回规范化后的副渠道 HTTP(S) 基地址。
- * 拒绝空串、相对路径或非 http(s) 协议，防止 `reverse_proxy: ""` 触发酒馆回退主 OpenAI Key。
+ * 拒绝空串、相对路径、非 http(s) 协议、内嵌凭据、查询串与片段，
+ * 防止 `reverse_proxy: ""` 触发酒馆回退主 OpenAI Key 或造成后端代理路由拼接污染。
  */
-export function requireValidSideChannelBaseUrl(url: string): string {
-  const normalized = normalizeSideChannelBaseUrl(url);
-  if (!normalized) {
-    throw new Error('请先填写副 API 地址');
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(normalized);
-  } catch {
-    throw new Error('副 API 地址无效，请填写以 http:// 或 https:// 开头的完整地址');
-  }
-  if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !parsed.hostname) {
-    throw new Error('副 API 地址必须使用 http:// 或 https:// 协议');
-  }
-  return normalized;
+export function requireValidSideChannelBaseUrl(
+  url: string,
+  options?: { appendDefaultV1?: boolean },
+): string {
+  return parseSideChannelBaseUrl(url, options);
 }

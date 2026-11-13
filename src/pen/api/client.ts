@@ -30,9 +30,9 @@ function alternateUrl(url: string): string {
   return /\/v1$/i.test(url) ? url.replace(/\/v1$/i, '') : `${url}/v1`;
 }
 
-function resolveValidEndpointUrl(rawUrl: string): string {
+function resolveValidEndpointUrl(rawUrl: string, appendDefaultV1 = true): string {
   try {
-    return requireValidSideChannelBaseUrl(rawUrl);
+    return requireValidSideChannelBaseUrl(rawUrl, { appendDefaultV1 });
   } catch (error) {
     throw new ApiError(error instanceof Error ? error.message : String(error));
   }
@@ -73,36 +73,104 @@ function extractContent(data: any): string {
   ).trim();
 }
 
+function throwApiErrorFromPayload(rawError: unknown): never {
+  const errObj =
+    rawError && typeof rawError === 'object'
+      ? (rawError as { message?: unknown; status?: unknown; code?: unknown })
+      : null;
+  const msg =
+    typeof rawError === 'string' && rawError.trim()
+      ? rawError.trim()
+      : typeof errObj?.message === 'string' && errObj.message.trim()
+        ? errObj.message.trim()
+        : '副 API 返回错误';
+  const inferredStatus =
+    typeof errObj?.status === 'number'
+      ? errObj.status
+      : typeof errObj?.code === 'number' && errObj.code >= 400 && errObj.code < 600
+        ? errObj.code
+        : /\b(404|not found)\b/i.test(msg)
+          ? 404
+          : /\b(405|method not allowed)\b/i.test(msg)
+            ? 405
+            : undefined;
+  throw new ApiError(`副 API 返回错误：${msg}`, inferredStatus);
+}
+
+export function parseJsonCompletion(data: unknown): string {
+  if (data && typeof data === 'object' && 'error' in data && (data as { error?: unknown }).error) {
+    throwApiErrorFromPayload((data as { error: unknown }).error);
+  }
+  return extractContent(data);
+}
+
 async function readSseContent(response: Response): Promise<string> {
   const reader = response.body?.getReader();
-  if (!reader) return extractContent(await response.json().catch(() => null));
+  if (!reader) {
+    const data = await response.json().catch(() => null);
+    return parseJsonCompletion(data);
+  }
   const decoder = new TextDecoder();
   let buffer = '';
+  let rawText = '';
   let output = '';
+  let sawDataLine = false;
+
+  const consumeLine = (line: string) => {
+    const text = line.trim();
+    if (!text.startsWith('data:')) return;
+    sawDataLine = true;
+    const payload = text.slice(5).trim();
+    if (!payload || payload === '[DONE]') return;
+    try {
+      const data = JSON.parse(payload);
+      if (data?.error) throwApiErrorFromPayload(data.error);
+      const delta =
+        data?.choices?.[0]?.delta?.content ??
+        data?.choices?.[0]?.message?.content ??
+        data?.choices?.[0]?.text;
+      if (typeof delta === 'string') output += delta;
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+    }
+  };
+
   for (;;) {
     const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+    if (done) {
+      const tail = decoder.decode();
+      buffer += tail;
+      rawText += tail;
+      if (buffer) {
+        for (const line of buffer.split('\n')) {
+          consumeLine(line);
+        }
+        buffer = '';
+      }
+      break;
+    }
+    const chunk = decoder.decode(value, { stream: true });
+    buffer += chunk;
+    rawText += chunk;
     const lines = buffer.split('\n');
     buffer = lines.pop() ?? '';
     for (const line of lines) {
-      const text = line.trim();
-      if (!text.startsWith('data:')) continue;
-      const payload = text.slice(5).trim();
-      if (!payload || payload === '[DONE]') continue;
-      try {
-        const data = JSON.parse(payload);
-        if (data?.error) throw new ApiError(data.error.message || '副 API 返回错误');
-        const delta =
-          data?.choices?.[0]?.delta?.content ??
-          data?.choices?.[0]?.message?.content ??
-          data?.choices?.[0]?.text;
-        if (typeof delta === 'string') output += delta;
-      } catch (error) {
-        if (error instanceof ApiError) throw error;
-      }
+      consumeLine(line);
     }
   }
+
+  if (!sawDataLine && !output && rawText.trim()) {
+    let parsed: unknown = null;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      parsed = null;
+    }
+    if (parsed !== null) {
+      return parseJsonCompletion(parsed);
+    }
+  }
+
   return output.trim();
 }
 
@@ -120,7 +188,7 @@ export function buildRequestBody(
   messages: ChatMessage[],
   reverseProxy: string,
 ): Record<string, unknown> {
-  const endpointUrl = resolveValidEndpointUrl(reverseProxy);
+  const endpointUrl = resolveValidEndpointUrl(reverseProxy, false);
   const excluded = new Set(filterExcludeParams(channel.excludeParams));
   const rawEffort = channel.reasoningEffort?.trim() ?? '';
   const effort = excluded.has('reasoning_effort') ? '' : rawEffort;
@@ -195,7 +263,7 @@ async function requestAtUrl(
     }
     const content = channel.stream
       ? await readSseContent(response)
-      : extractContent(await response.json());
+      : parseJsonCompletion(await response.json());
     if (!content) throw new ApiError('副 API 返回空内容');
     return content;
   });

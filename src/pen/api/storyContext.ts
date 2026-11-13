@@ -2,6 +2,7 @@ import {
   getCheckWorldInfo,
   getContext,
   getEjsTemplate,
+  getOpenChatIdentity,
   type STExtensionPromptDescriptor,
   type STMessage,
   type WorldInfoEntry,
@@ -76,7 +77,7 @@ function isStoryUserMessage(message: STMessage | undefined): message is STMessag
 function isStoryAssistantMessage(message: STMessage | undefined): message is STMessage {
   if (!message || message.is_user || isSystemUiMessage(message)) return false;
   if (!message.is_system) return true;
-  const name = message.name.trim().toLowerCase();
+  const name = (message.name ?? '').trim().toLowerCase();
   return name !== 'system' && name !== 'sillytavern system';
 }
 
@@ -85,34 +86,49 @@ export function selectHistoryIndices(
   floor: number,
   rounds: number,
 ): number[] {
+  if (rounds <= 0 || floor <= 0) return [];
   const selected: number[] = [];
-  let cursor = floor;
-  for (let round = 0; round < rounds; round += 1) {
-    let userIndex = -1;
-    for (let index = cursor - 1; index >= 0; index -= 1) {
-      const message = chat[index];
-      if (isStoryUserMessage(message)) {
-        userIndex = index;
-        break;
-      }
-    }
-    if (userIndex < 0) break;
+  let cursor = floor - 1;
 
-    let aiIndex = -1;
-    for (let index = userIndex - 1; index >= 0; index -= 1) {
-      const message = chat[index];
-      if (isStoryAssistantMessage(message)) {
-        aiIndex = index;
-        break;
+  const skipNonStoryBackward = (start: number): number => {
+    let index = start;
+    while (index >= 0 && !isStoryUserMessage(chat[index]) && !isStoryAssistantMessage(chat[index])) {
+      index -= 1;
+    }
+    return index;
+  };
+
+  for (let round = 0; round < rounds && cursor >= 0; round += 1) {
+    cursor = skipNonStoryBackward(cursor);
+    if (cursor < 0) break;
+
+    if (isStoryAssistantMessage(chat[cursor])) {
+      const roundIndices: number[] = [];
+      while (cursor >= 0) {
+        cursor = skipNonStoryBackward(cursor);
+        if (cursor < 0 || !isStoryAssistantMessage(chat[cursor])) break;
+        roundIndices.unshift(cursor);
+        cursor -= 1;
       }
+      cursor = skipNonStoryBackward(cursor);
+      if (cursor >= 0 && isStoryUserMessage(chat[cursor])) {
+        roundIndices.unshift(cursor);
+        cursor -= 1;
+      }
+      selected.unshift(...roundIndices);
+      continue;
     }
-    selected.unshift(userIndex);
-    if (aiIndex >= 0) {
-      selected.unshift(aiIndex);
-      cursor = aiIndex;
-    } else {
-      break;
+
+    const userIndex = cursor;
+    cursor -= 1;
+    const aiIndices: number[] = [];
+    while (cursor >= 0) {
+      cursor = skipNonStoryBackward(cursor);
+      if (cursor < 0 || !isStoryAssistantMessage(chat[cursor])) break;
+      aiIndices.unshift(cursor);
+      cursor -= 1;
     }
+    selected.unshift(...aiIndices, userIndex);
   }
   return selected;
 }
@@ -128,6 +144,7 @@ export function serializeRewriteHistory(
   indices: number[],
   userName: string,
   characterName: string,
+  targetFloor?: number,
 ): SerializedRewriteHistory {
   const entries = indices
     .map(index => {
@@ -136,8 +153,9 @@ export function serializeRewriteHistory(
       return message && text ? { index, message, text } : null;
     })
     .filter((entry): entry is NonNullable<typeof entry> => !!entry);
+  const rewritingUserFloor = targetFloor !== undefined && Boolean(chat[targetFloor]?.is_user);
   const latest = entries.at(-1);
-  const latestUser = latest?.message.is_user ? latest : null;
+  const latestUser = !rewritingUserFloor && latest?.message.is_user ? latest : null;
   const referenceEntries = latestUser ? entries.slice(0, -1) : entries;
   const historyReference = referenceEntries
     .map(({ index, message, text }) => {
@@ -267,26 +285,40 @@ async function renderWorldInfoContent(
  * 在干跑前后快照并还原该槽位，避免多次改写预览污染后续正常聊天生成。
  */
 async function withIsolatedAuthorNotePrompt<T>(task: () => Promise<T>): Promise<T> {
-  const prompts = getContext()?.extensionPrompts;
+  const startContext = getContext();
+  const prompts = startContext?.extensionPrompts;
   if (!prompts || typeof prompts !== 'object') {
     return task();
   }
 
+  const startIdentity = getOpenChatIdentity(startContext);
   const hadKey = Object.prototype.hasOwnProperty.call(prompts, AUTHOR_NOTE_EXTENSION_KEY);
   const previous = prompts[AUTHOR_NOTE_EXTENSION_KEY];
   const snapshot: STExtensionPromptDescriptor | undefined =
     previous && typeof previous === 'object' ? { ...previous } : previous;
+  if (!hadKey) {
+    prompts[AUTHOR_NOTE_EXTENSION_KEY] = {
+      value: '',
+      position: 1,
+      depth: 4,
+      scan: false,
+      role: 0,
+    };
+  }
 
   try {
     return await task();
   } finally {
-    const livePrompts = getContext()?.extensionPrompts ?? prompts;
-    if (livePrompts && typeof livePrompts === 'object') {
-      if (hadKey) {
-        livePrompts[AUTHOR_NOTE_EXTENSION_KEY] =
-          snapshot && typeof snapshot === 'object' ? { ...snapshot } : snapshot;
-      } else {
-        delete livePrompts[AUTHOR_NOTE_EXTENSION_KEY];
+    const liveContext = getContext();
+    if (getOpenChatIdentity(liveContext) === startIdentity) {
+      const livePrompts = liveContext?.extensionPrompts ?? prompts;
+      if (livePrompts && typeof livePrompts === 'object') {
+        if (hadKey) {
+          livePrompts[AUTHOR_NOTE_EXTENSION_KEY] =
+            snapshot && typeof snapshot === 'object' ? { ...snapshot } : snapshot;
+        } else {
+          delete livePrompts[AUTHOR_NOTE_EXTENSION_KEY];
+        }
       }
     }
   }
@@ -394,6 +426,7 @@ export async function collectRewriteStoryContext(
     indices,
     context.name1 || 'User',
     context.name2 || 'Char',
+    floor,
   );
 
   const targetMessage = context.chat[floor];

@@ -59,13 +59,14 @@ function installExtensionUpdateDiagnosticsFetchHook() {
         return existing;
     }
 
-    const originalFetch = globalThis.fetch;
-    if (typeof originalFetch !== 'function') {
+    const rawOriginalFetch = globalThis.fetch;
+    if (typeof rawOriginalFetch !== 'function') {
         return null;
     }
 
     const state = {
-        originalFetch: originalFetch.bind(globalThis),
+        rawOriginalFetch,
+        originalFetch: rawOriginalFetch.bind(globalThis),
         wrappedFetch: null,
     };
 
@@ -97,6 +98,9 @@ function installExtensionUpdateDiagnosticsFetchHook() {
         return response;
     };
 
+    state.wrappedFetch[EXTENSION_UPDATE_DIAGNOSTICS_FETCH_KEY] = true;
+    state.wrappedFetch.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
+    state.wrappedFetch.__baiBaiToolkitHookState = state;
     globalThis[EXTENSION_UPDATE_DIAGNOSTICS_FETCH_KEY] = state;
     globalThis.fetch = state.wrappedFetch;
     return state;

@@ -1,5 +1,5 @@
 const ARROW_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
-const guardedRoots = new WeakSet<ShadowRoot>();
+const guardedRoots = new WeakSet<EventTarget>();
 
 function pathContainsEditable(event: KeyboardEvent): boolean {
   return event.composedPath().some(node =>
@@ -14,7 +14,7 @@ function pathContainsEditable(event: KeyboardEvent): boolean {
  * 防止 Shadow DOM 内编辑控件的方向键继续冒泡到 ST 全局快捷键。
  * 只截断传播,不 preventDefault,故光标移动、选项切换和数字增减仍由控件正常处理。
  */
-export function guardEditableArrowKeys(root: ShadowRoot): void {
+export function guardEditableArrowKeys(root: ShadowRoot | EventTarget): void {
   if (guardedRoots.has(root)) return;
   guardedRoots.add(root);
   root.addEventListener('keydown', event => {

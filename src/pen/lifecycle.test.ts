@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { bindEditButtons, unbindEditButtons } from '@pen/editButton';
 import { removeStEventListener } from '@pen/st/context';
+import { guardEditableArrowKeys } from '@pen/st/keyboard';
+import { resetPenUiState, ui } from '@pen/state/ui';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -39,21 +41,22 @@ describe('removeStEventListener', () => {
   });
 });
 
-describe('editButton rAF teardown', () => {
-  it('cancels queued requestAnimationFrame and prevents post-unbind button insertion', () => {
+describe('editButton rAF teardown & observer hygiene', () => {
+  it('cancels queued requestAnimationFrame, avoids attributes:true observer storms, and prevents post-unbind insertion', () => {
     const queuedFrames = new Map<number, FrameRequestCallback>();
     let nextFrameId = 0;
     const cancelSpy = vi.fn((id: number) => {
       queuedFrames.delete(id);
     });
     let mutationCallback: (() => void) | null = null;
+    const observeSpy = vi.fn();
     const disconnectSpy = vi.fn();
 
     class FakeMutationObserver {
       constructor(cb: () => void) {
         mutationCallback = cb;
       }
-      observe = vi.fn();
+      observe = observeSpy;
       disconnect = disconnectSpy;
     }
 
@@ -118,6 +121,7 @@ describe('editButton rAF teardown', () => {
 
     bindEditButtons();
     expect(mutationCallback).toBeTypeOf('function');
+    expect(observeSpy).toHaveBeenCalledWith(fakeChat, { childList: true, subtree: true });
 
     // 打开编辑框触发一次 Mutation，排队 rAF 尚未执行时立即停用柏宝砚
     editorActive = true;
@@ -136,5 +140,44 @@ describe('editButton rAF teardown', () => {
       cb(16);
     }
     expect(insertedButtons).toHaveLength(0);
+  });
+});
+
+describe('P-6：guardEditableArrowKeys 幂等注册与 resetPenUiState 重置', () => {
+  it('accepts arbitrary EventTarget roots once via WeakSet without duplicate listener binding', () => {
+    const addSpy = vi.fn();
+    const fakeRoot = {
+      addEventListener: addSpy,
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(() => true),
+    } as unknown as EventTarget;
+
+    guardEditableArrowKeys(fakeRoot);
+    guardEditableArrowKeys(fakeRoot);
+    expect(addSpy).toHaveBeenCalledOnce();
+    expect(addSpy).toHaveBeenCalledWith('keydown', expect.any(Function));
+  });
+
+  it('resetPenUiState clears active floor, chat identity, originalText, and paragraphs', () => {
+    ui.open = true;
+    ui.floor = 5;
+    ui.floorLabel = '#5';
+    ui.speaker = 'Alice';
+    ui.originalText = '旧草稿';
+    ui.chatId = 'chat-old';
+    ui.chatIdentity = 'character:a.png\u0000chat-old';
+    ui.paragraphs = [{ id: 1, text: '旧段落' }];
+
+    resetPenUiState();
+    expect(ui).toMatchObject({
+      open: false,
+      floor: null,
+      floorLabel: '',
+      speaker: '',
+      originalText: '',
+      chatId: '',
+      chatIdentity: '',
+      paragraphs: [],
+    });
   });
 });

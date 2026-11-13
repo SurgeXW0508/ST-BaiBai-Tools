@@ -11,6 +11,22 @@ function applyCharacterSearchInputOptimization() {
     };
     extensionState[CHARACTER_SEARCH_OPTIMIZATION_KEY] = state;
 
+    if (!settings.characterSearchInputOptimizationEnabled) {
+        if (state.retryTimer) {
+            clearTimeout(state.retryTimer);
+            state.retryTimer = null;
+        }
+        clearTimeout(state.debounceTimer);
+        state.debounceTimer = null;
+        const originalInput = document.getElementById('character_search_bar');
+        if (state.installed && originalInput) {
+            removeCharacterSearchInputOptimization(state, originalInput);
+        } else {
+            state.installed = false;
+        }
+        return;
+    }
+
     // Retry finding the input if it's not available immediately (e.g. ST not fully initialized)
     const originalInput = document.getElementById('character_search_bar');
     if (!originalInput) {
@@ -23,14 +39,8 @@ function applyCharacterSearchInputOptimization() {
         return;
     }
 
-    if (settings.characterSearchInputOptimizationEnabled) {
-        if (!state.installed) {
-            installCharacterSearchInputOptimization(state, originalInput);
-        }
-    } else {
-        if (state.installed) {
-            removeCharacterSearchInputOptimization(state, originalInput);
-        }
+    if (!state.installed) {
+        installCharacterSearchInputOptimization(state, originalInput);
     }
 }
 

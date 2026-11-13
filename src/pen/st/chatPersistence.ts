@@ -18,16 +18,20 @@ interface SaveAttemptRecord {
 interface SaveObservationScope {
   expectedChatId: string;
   expectedIdentity: string;
-  records: SaveAttemptRecord[];
+  slots: Array<SaveAttemptRecord | null>;
   pending: Promise<void>[];
 }
 
 const SAVE_CHAT_PATH = '/api/chats/save';
 const SAVE_GROUP_CHAT_PATH = '/api/chats/group/save';
 const OBSERVER_MARK = Symbol.for('st-baibai-tools.pen.chat-save-fetch-observer');
+const UNDERLYING_FETCH = Symbol.for('st-baibai-tools.pen.chat-save-underlying-fetch');
 
 type MarkedFetch = typeof fetch & {
   [OBSERVER_MARK]?: true;
+  [UNDERLYING_FETCH]?: typeof fetch;
+  __penUnderlyingFetch?: typeof fetch;
+  __baiBaiToolkitOriginalFetch?: typeof fetch;
 };
 
 const activeScopes = new Set<SaveObservationScope>();
@@ -63,11 +67,105 @@ function classifySaveEndpoint(input: RequestInfo | URL): SaveEndpointKind | null
   return null;
 }
 
-function extractRequestChatKey(endpoint: SaveEndpointKind, init?: RequestInit): string | null {
-  const body = init?.body;
-  if (typeof body !== 'string' || !body.trim()) return null;
+function hasGzipContentEncoding(input: RequestInfo | URL, init?: RequestInit): boolean {
   try {
-    const parsed = JSON.parse(body) as { file_name?: unknown; id?: unknown };
+    const rawHeaders =
+      init?.headers ??
+      (typeof Request !== 'undefined' && input instanceof Request ? input.headers : undefined);
+    if (!rawHeaders) return false;
+    const headers = rawHeaders instanceof Headers ? rawHeaders : new Headers(rawHeaders);
+    const encoding = headers.get('content-encoding') ?? '';
+    return /\bgzip\b/i.test(encoding);
+  } catch {
+    return false;
+  }
+}
+
+async function decodeBytesToText(bytes: Uint8Array, gzipped: boolean): Promise<string | null> {
+  if (bytes.byteLength === 0) return null;
+  if (gzipped) {
+    if (typeof DecompressionStream !== 'function' || typeof Response !== 'function') {
+      return null;
+    }
+    try {
+      const stream = new Blob([bytes as unknown as BlobPart])
+        .stream()
+        .pipeThrough(new DecompressionStream('gzip'));
+      return await new Response(stream).text();
+    } catch {
+      return null;
+    }
+  }
+  try {
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+async function readRequestBodyText(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<string | null> {
+  const gzipped = hasGzipContentEncoding(input, init);
+  const body = init?.body;
+
+  if (typeof body === 'string') {
+    return body;
+  }
+
+  if (body !== undefined && body !== null) {
+    if (typeof ArrayBuffer !== 'undefined' && body instanceof ArrayBuffer) {
+      return decodeBytesToText(new Uint8Array(body), gzipped);
+    }
+    if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView(body)) {
+      const view = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+      return decodeBytesToText(view, gzipped);
+    }
+    if (typeof Blob !== 'undefined' && body instanceof Blob) {
+      if (body.size === 0) return null;
+      if (!gzipped && typeof body.text === 'function') {
+        try {
+          return await body.text();
+        } catch {
+          return null;
+        }
+      }
+      try {
+        const buffer = await body.arrayBuffer();
+        return decodeBytesToText(new Uint8Array(buffer), gzipped);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  if (typeof Request !== 'undefined' && input instanceof Request && !input.bodyUsed) {
+    try {
+      const cloned = input.clone();
+      if (!gzipped) {
+        return await cloned.text();
+      }
+      const buffer = await cloned.arrayBuffer();
+      return decodeBytesToText(new Uint8Array(buffer), true);
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+async function extractRequestChatKey(
+  endpoint: SaveEndpointKind,
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<string | null> {
+  const rawText = await readRequestBodyText(input, init);
+  if (!rawText || !rawText.trim()) return null;
+  try {
+    const parsed = JSON.parse(rawText) as { file_name?: unknown; id?: unknown };
     if (endpoint === 'character') {
       return normalizeChatKey(parsed?.file_name) || null;
     }
@@ -134,63 +232,100 @@ async function inspectSaveResponse(
       };
 }
 
+function isObserverInFetchChain(candidate: unknown): boolean {
+  const visited = new Set<unknown>();
+  let current = candidate as MarkedFetch | undefined;
+  while (typeof current === 'function' && !visited.has(current)) {
+    if (current[OBSERVER_MARK]) return true;
+    visited.add(current);
+    current =
+      current.__baiBaiToolkitOriginalFetch ??
+      current[UNDERLYING_FETCH] ??
+      current.__penUnderlyingFetch;
+  }
+  return false;
+}
+
 /**
  * 幂等单次包装 globalThis.fetch，仅在存在活跃保存观察窗口时旁路记录
- * `/api/chats/save` 与 `/api/chats/group/save` 的最终落盘状态，绝不消费原始响应流、
- * 也绝不在异步结束时卸载覆盖其他扩展包装器。
+ * `/api/chats/save` 与 `/api/chats/group/save` 的最终落盘状态，绝不延迟底层 fetch 发起、
+ * 绝不消费原始响应流，也绝不在外层存在其他包装器时重复挂载第二层。
  */
 export function ensureChatSaveFetchObserver(): void {
   const current = globalThis.fetch as MarkedFetch | undefined;
-  if (typeof current !== 'function' || current[OBSERVER_MARK]) return;
+  if (typeof current !== 'function' || isObserverInFetchChain(current)) return;
 
-  const underlying = current;
-  const wrapped: MarkedFetch = function observedChatSaveFetch(
-    this: unknown,
-    input: RequestInfo | URL,
-    init?: RequestInit,
-  ): Promise<Response> {
-    if (activeScopes.size === 0) {
-      return underlying.call(this, input, init);
-    }
-
-    const endpoint = classifySaveEndpoint(input);
-    if (!endpoint) {
-      return underlying.call(this, input, init);
-    }
-
-    const requestChatKey = extractRequestChatKey(endpoint, init);
-    const liveContext = getContext();
-    const liveChatId = getOpenChatId(liveContext);
-    const liveIdentity = getOpenChatIdentity(liveContext);
-    const matchedScopes = [...activeScopes].filter(scope =>
-      scopeMatchesRequest(scope, requestChatKey, liveChatId, liveIdentity),
-    );
-
-    const responsePromise = underlying.call(this, input, init);
-    if (matchedScopes.length === 0) {
-      return responsePromise;
-    }
-
-    const recordPromise = responsePromise.then(
-      response => inspectSaveResponse(endpoint, response),
-      error => ({
-        endpoint,
-        ok: false,
-        errorMessage: `聊天保存请求异常（${error instanceof Error ? error.message : String(error)}），修改未写入磁盘`,
-      }),
-    );
-
-    for (const scope of matchedScopes) {
-      const tracker = recordPromise.then(record => {
-        scope.records.push(record);
-      });
-      scope.pending.push(tracker);
-    }
-
-    return responsePromise;
+  const hookState = {
+    rawOriginalFetch: current,
+    originalFetch: current.bind(globalThis),
   };
+  const wrapped: MarkedFetch & { __baiBaiToolkitHookState?: typeof hookState } =
+    function observedChatSaveFetch(
+      this: unknown,
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> {
+      const targetFetch = wrapped.__baiBaiToolkitOriginalFetch ?? hookState.rawOriginalFetch;
+      if (activeScopes.size === 0) {
+        return targetFetch.call(this, input, init);
+      }
+
+      const endpoint = classifySaveEndpoint(input);
+      if (!endpoint) {
+        return targetFetch.call(this, input, init);
+      }
+
+      const liveContextAtDispatch = getContext();
+      const liveChatIdAtDispatch = getOpenChatId(liveContextAtDispatch);
+      const liveIdentityAtDispatch = getOpenChatIdentity(liveContextAtDispatch);
+      const reservations = [...activeScopes].map(scope => {
+        const slotIndex = scope.slots.length;
+        scope.slots.push(null);
+        return { scope, slotIndex };
+      });
+
+      // 同步调用底层 fetch 前按需提取异步 body Promise（对 Request 立即 clone，绝不阻塞 fetch 派发）
+      const chatKeyPromise = extractRequestChatKey(endpoint, input, init);
+      const responsePromise = targetFetch.call(this, input, init);
+
+      const recordPromise = responsePromise.then(
+        response => inspectSaveResponse(endpoint, response),
+        error => ({
+          endpoint,
+          ok: false,
+          errorMessage: `聊天保存请求异常（${error instanceof Error ? error.message : String(error)}），修改未写入磁盘`,
+        }),
+      );
+
+      const settleTask = Promise.all([chatKeyPromise, recordPromise]).then(
+        ([requestChatKey, record]) => {
+          for (const { scope, slotIndex } of reservations) {
+            if (
+              scopeMatchesRequest(
+                scope,
+                requestChatKey,
+                liveChatIdAtDispatch,
+                liveIdentityAtDispatch,
+              )
+            ) {
+              scope.slots[slotIndex] = record;
+            }
+          }
+        },
+      );
+
+      for (const { scope } of reservations) {
+        scope.pending.push(settleTask);
+      }
+
+      return responsePromise;
+    };
 
   wrapped[OBSERVER_MARK] = true;
+  wrapped[UNDERLYING_FETCH] = current;
+  wrapped.__penUnderlyingFetch = current;
+  wrapped.__baiBaiToolkitOriginalFetch = current;
+  wrapped.__baiBaiToolkitHookState = hookState;
   globalThis.fetch = wrapped;
 }
 
@@ -261,7 +396,7 @@ export async function runWithObservedChatSave<T>(
   const scope: SaveObservationScope = {
     expectedChatId: options.expectedChatId,
     expectedIdentity: options.expectedIdentity,
-    records: [],
+    slots: [],
     pending: [],
   };
   activeScopes.add(scope);
@@ -276,8 +411,9 @@ export async function runWithObservedChatSave<T>(
     activeScopes.delete(scope);
   }
 
-  if (scope.records.length > 0) {
-    const finalAttempt = scope.records[scope.records.length - 1];
+  const matchedRecords = scope.slots.filter((item): item is SaveAttemptRecord => item !== null);
+  if (matchedRecords.length > 0) {
+    const finalAttempt = matchedRecords[matchedRecords.length - 1];
     if (!finalAttempt.ok) {
       throw new Error(finalAttempt.errorMessage || '聊天保存失败，修改未写入磁盘');
     }

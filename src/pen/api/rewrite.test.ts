@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { formatAnnotations, parseChanges, rewriteCurrentFloor } from '@pen/api/rewrite';
 import { CHAIN_OF_THOUGHT_PROMPT } from '@pen/api/prompts';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('formatAnnotations', () => {
   it('groups paragraphs sharing identical instructions into one common-requirement block', () => {
@@ -93,7 +97,7 @@ describe('default reasoning prompt', () => {
   });
 });
 
-describe('rewriteCurrentFloor main-API isolation', () => {
+describe('rewriteCurrentFloor main-API isolation & pre-completion abort', () => {
   it('requires an explicit side-channel and refuses channel=null', async () => {
     await expect(
       rewriteCurrentFloor({
@@ -108,5 +112,54 @@ describe('rewriteCurrentFloor main-API isolation', () => {
         channel: null,
       }),
     ).rejects.toThrow('添加并选择副渠道');
+  });
+
+  it('aborts immediately after collectRewriteStoryContext without calling fetch when signal aborts', async () => {
+    const controller = new AbortController();
+    const fetchSpy = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    vi.stubGlobal('window', {
+      SillyTavern: {
+        getContext: () => ({
+          chat: [{ name: 'Char', is_user: false, is_system: false, mes: '原段落' }],
+          getRequestHeaders: () => ({}),
+          substituteParams: () => {
+            controller.abort();
+            return 'expanded';
+          },
+        }),
+      },
+      setTimeout,
+      clearTimeout,
+    });
+
+    await expect(
+      rewriteCurrentFloor({
+        floor: 0,
+        originalText: '原段落',
+        annotations: [{ paragraph: 1, text: '原段落', instructions: ['改短一点'] }],
+        generalInstructions: [],
+        contextRounds: 0,
+        includeWorldInfo: false,
+        includeCharacterDescription: false,
+        includeUserDescription: true,
+        channel: {
+          id: 'ch1',
+          name: '副渠道',
+          url: 'https://api.example.com/v1',
+          key: 'sk-test',
+          model: 'gpt-4o-mini',
+          temperature: 1,
+          maxTokens: 1024,
+          timeoutSec: 30,
+          stream: false,
+          prefill: true,
+          excludeParams: [],
+          reasoningEffort: '',
+        },
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

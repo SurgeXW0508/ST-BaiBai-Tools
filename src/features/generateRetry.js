@@ -9,24 +9,69 @@ import { getGenerationStopEpoch, isCurrentGenerationStopped, subscribeGeneration
 import { extensionState, settings } from './state.js';
 import { readFetchJsonBody } from './util.js';
 
+function isFetchWrapperInChain(root, target) {
+    if (typeof root !== 'function' || typeof target !== 'function') {
+        return false;
+    }
+    const visited = new Set();
+    let cursor = root;
+    while (typeof cursor === 'function' && !visited.has(cursor)) {
+        if (cursor === target) {
+            return true;
+        }
+        visited.add(cursor);
+        cursor = cursor.__baiBaiToolkitOriginalFetch;
+    }
+    return false;
+}
+
+function spliceFetchWrapperOut(wrappedFetch, rawOriginalFetch) {
+    if (typeof wrappedFetch !== 'function' || typeof rawOriginalFetch !== 'function') {
+        return false;
+    }
+    if (globalThis.fetch === wrappedFetch) {
+        globalThis.fetch = rawOriginalFetch;
+        return true;
+    }
+    const visited = new Set();
+    let cursor = globalThis.fetch;
+    while (typeof cursor === 'function' && !visited.has(cursor)) {
+        visited.add(cursor);
+        if (cursor.__baiBaiToolkitOriginalFetch === wrappedFetch) {
+            cursor.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
+            if (cursor.__baiBaiToolkitHookState && typeof cursor.__baiBaiToolkitHookState === 'object') {
+                cursor.__baiBaiToolkitHookState.rawOriginalFetch = rawOriginalFetch;
+                cursor.__baiBaiToolkitHookState.originalFetch = rawOriginalFetch.bind(globalThis);
+            }
+            return true;
+        }
+        cursor = cursor.__baiBaiToolkitOriginalFetch;
+    }
+    return false;
+}
+
 function installGenerateRetryFetchHook() {
     const existing = globalThis[GENERATE_RETRY_FETCH_KEY];
-    if (existing?.wrappedFetch) {
+    if (existing?.wrappedFetch && isFetchWrapperInChain(globalThis.fetch, existing.wrappedFetch)) {
+        existing.disabled = false;
         existing.isEnabled = () => settings.generateRetryEnabled === true;
         installGenerateRetryEventHandlers(existing);
         return existing;
     }
 
-    const originalFetch = globalThis.fetch;
-    if (typeof originalFetch !== 'function') {
+    const rawOriginalFetch = globalThis.fetch;
+    if (typeof rawOriginalFetch !== 'function') {
         return null;
     }
 
     const state = {
-        originalFetch: originalFetch.bind(globalThis),
+        rawOriginalFetch,
+        originalFetch: rawOriginalFetch.bind(globalThis),
         wrappedFetch: null,
         nativeWindow: null,
+        disabled: false,
         eventHandlersInstalled: false,
+        eventHandlers: [],
         isEnabled: () => settings.generateRetryEnabled === true,
     };
 
@@ -41,22 +86,63 @@ function installGenerateRetryFetchHook() {
 
         const payload = await readFetchJsonBody(input, init);
         const body = kind === 'save-generate' ? payload?.generate : payload;
-        const request = matchGenerateRetryRequest(state, body, kind, init);
+        const request = state.disabled ? null : matchGenerateRetryRequest(state, body, kind, init);
         const clean = stripGenerationRequestId(body);
         // Strip even when retry is off, an intent was cleared, or background routing
         // was declined. The correlation field is never part of the API payload.
         if (clean !== body) {
             init = { ...(init || {}), body: JSON.stringify(kind === 'save-generate' ? { ...payload, generate: clean } : clean) };
         }
-        if (!request || isFetchRequest(input)) return state.originalFetch(input, init);
+        if (state.disabled || !request || isFetchRequest(input)) return state.originalFetch(input, init);
         return runGenerateRetryRequest(state, request, input, init);
     };
 
     state.wrappedFetch[GENERATE_RETRY_FETCH_KEY] = true;
+    state.wrappedFetch.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
+    state.wrappedFetch.__baiBaiToolkitHookState = state;
     globalThis[GENERATE_RETRY_FETCH_KEY] = state;
     globalThis.fetch = state.wrappedFetch;
     installGenerateRetryEventHandlers(state);
     return state;
+}
+
+function uninstallGenerateRetryEventHandlers(state) {
+    if (!state?.eventHandlersInstalled) {
+        return;
+    }
+    const removeFn = typeof eventSource?.removeListener === 'function'
+        ? eventSource.removeListener
+        : (typeof eventSource?.off === 'function' ? eventSource.off : null);
+    if (removeFn && Array.isArray(state.eventHandlers)) {
+        for (const [event, handler] of state.eventHandlers) {
+            removeFn.call(eventSource, event, handler);
+        }
+    }
+    state.eventHandlers = [];
+    state.eventHandlersInstalled = false;
+}
+
+function disableGenerateRetryFetchHook() {
+    const existing = globalThis[GENERATE_RETRY_FETCH_KEY];
+    if (!existing?.wrappedFetch) {
+        return false;
+    }
+    existing.disabled = true;
+    closeGenerateRetryWindow(existing);
+    uninstallGenerateRetryEventHandlers(existing);
+    const spliced = spliceFetchWrapperOut(existing.wrappedFetch, existing.rawOriginalFetch);
+    if (spliced || !isFetchWrapperInChain(globalThis.fetch, existing.wrappedFetch)) {
+        delete globalThis[GENERATE_RETRY_FETCH_KEY];
+    }
+    return spliced;
+}
+
+function syncGenerateRetryFetchHook() {
+    if (settings.generateRetryEnabled === true) {
+        return installGenerateRetryFetchHook();
+    }
+    disableGenerateRetryFetchHook();
+    return null;
 }
 
 function installGenerateRetryEventHandlers(state) {
@@ -65,39 +151,38 @@ function installGenerateRetryEventHandlers(state) {
     }
 
     state.eventHandlersInstalled = true;
+    state.eventHandlers = [];
 
-    if (event_types.GENERATION_AFTER_COMMANDS) {
-        eventSource.on(event_types.GENERATION_AFTER_COMMANDS, (type, options, dryRun) => {
-            openGenerateRetryWindow(state, type, dryRun);
-        });
-    }
+    const register = (event, handler) => {
+        if (!event) return;
+        eventSource.on(event, handler);
+        state.eventHandlers.push([event, handler]);
+    };
 
-    if (event_types.CHAT_COMPLETION_SETTINGS_READY) {
-        eventSource.on(event_types.CHAT_COMPLETION_SETTINGS_READY, body => {
-            bindGenerateRetryRequestBody(state, body);
-        });
-    }
+    register(event_types.GENERATION_AFTER_COMMANDS, (type, options, dryRun) => {
+        openGenerateRetryWindow(state, type, dryRun);
+    });
 
-    if (event_types.GENERATE_AFTER_DATA) {
-        eventSource.on(event_types.GENERATE_AFTER_DATA, (body, dryRun) => {
-            if (dryRun) {
-                return;
-            }
+    register(event_types.CHAT_COMPLETION_SETTINGS_READY, body => {
+        bindGenerateRetryRequestBody(state, body);
+    });
 
-            bindGenerateRetryRequestBody(state, body);
-        });
-    }
+    register(event_types.GENERATE_AFTER_DATA, (body, dryRun) => {
+        if (dryRun) {
+            return;
+        }
+
+        bindGenerateRetryRequestBody(state, body);
+    });
 
     for (const event of [event_types.GENERATION_ENDED, event_types.GENERATION_STOPPED, event_types.CHAT_CHANGED]) {
-        if (event) {
-            eventSource.on(event, () => closeGenerateRetryWindow(state));
-        }
+        register(event, () => closeGenerateRetryWindow(state));
     }
 }
 
 function openGenerateRetryWindow(state, type, dryRun) {
     // ST's token counter also calls Generate; a dry run must not clear the live request.
-    if (!state || dryRun) return;
+    if (!state || state.disabled || dryRun) return;
     closeGenerateRetryWindow(state);
     if (!settings.generateRetryEnabled && !settings.saveGenerateEnabled) return;
     const normalizedType = String(type || 'normal');
@@ -121,7 +206,7 @@ function closeGenerateRetryWindow(state) {
 
 function bindGenerateRetryRequestBody(state, body) {
     const active = state?.nativeWindow;
-    if (!active || !body || typeof body !== 'object' || Array.isArray(body)) return;
+    if (!active || state.disabled || !body || typeof body !== 'object' || Array.isArray(body)) return;
     if (!settings.generateRetryEnabled && !settings.saveGenerateEnabled) return;
     if (body.chat_completion_source === 'vertexai') {
         closeGenerateRetryWindow(state);
@@ -366,6 +451,7 @@ function bindGenerateRetrySettings({ saveSettings } = {}) {
         .off('input.baiBaiToolkitGenerateRetry')
         .on('input.baiBaiToolkitGenerateRetry', function () {
             settings.generateRetryEnabled = Boolean($(this).prop('checked'));
+            syncGenerateRetryFetchHook();
             persistSettings();
         });
 
@@ -383,6 +469,8 @@ export {
     bindGenerateRetrySettings,
     clampGenerateRetryMaxRetries,
     consumeGenerateRetryAttempt,
+    disableGenerateRetryFetchHook,
     getGenerateRetryMaxRetries,
     installGenerateRetryFetchHook,
+    syncGenerateRetryFetchHook,
 };

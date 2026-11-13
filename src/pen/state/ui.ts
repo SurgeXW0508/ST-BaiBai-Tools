@@ -120,6 +120,19 @@ export function closePen(): void {
   ui.open = false;
 }
 
+export function resetPenUiState(): void {
+  ui.open = false;
+  ui.page = 'workspace';
+  ui.stage = 'annotate';
+  ui.floor = null;
+  ui.floorLabel = '';
+  ui.speaker = '';
+  ui.originalText = '';
+  ui.chatId = '';
+  ui.chatIdentity = '';
+  ui.paragraphs = [];
+}
+
 /** 魔法棒入口(未在编辑态):先开楼层列表,选一楼再进工作台。不动 sessionRevision。 */
 export function openFloorPicker(): void {
   ui.page = 'floors';

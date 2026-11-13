@@ -7,6 +7,14 @@ import { LOG_PREFIX, extensionState, settings } from './state.js';
 function applyWelcomeRecentChatDirectOpenOptimization() {
     const existingHandler = extensionState[WELCOME_RECENT_CHAT_DIRECT_OPEN_HANDLER_KEY];
 
+    if (!settings.welcomeRecentChatDirectOpenEnabled) {
+        if (typeof existingHandler === 'function') {
+            document.removeEventListener('click', existingHandler, true);
+        }
+        delete extensionState[WELCOME_RECENT_CHAT_DIRECT_OPEN_HANDLER_KEY];
+        return;
+    }
+
     if (existingHandler?.[WELCOME_RECENT_CHAT_DIRECT_OPEN_CURRENT_HANDLER_KEY]) {
         return;
     }

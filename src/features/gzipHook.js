@@ -2,97 +2,159 @@ import { LOG_PREFIX, SAVE_REQUEST_GZIP_FETCH_KEY, SAVE_REQUEST_GZIP_PATHS } from
 import { getPerformanceTraceStackSummary, recordPerformanceTraceGzipCompression } from './perfTrace.js';
 import { settings } from './state.js';
 
+function isFetchWrapperInChain(root, target) {
+    if (typeof root !== 'function' || typeof target !== 'function') {
+        return false;
+    }
+    const visited = new Set();
+    let cursor = root;
+    while (typeof cursor === 'function' && !visited.has(cursor)) {
+        if (cursor === target) {
+            return true;
+        }
+        visited.add(cursor);
+        cursor = cursor.__baiBaiToolkitOriginalFetch;
+    }
+    return false;
+}
+
+function spliceFetchWrapperOut(wrappedFetch, rawOriginalFetch) {
+    if (typeof wrappedFetch !== 'function' || typeof rawOriginalFetch !== 'function') {
+        return false;
+    }
+    if (globalThis.fetch === wrappedFetch) {
+        globalThis.fetch = rawOriginalFetch;
+        return true;
+    }
+    const visited = new Set();
+    let cursor = globalThis.fetch;
+    while (typeof cursor === 'function' && !visited.has(cursor)) {
+        visited.add(cursor);
+        if (cursor.__baiBaiToolkitOriginalFetch === wrappedFetch) {
+            cursor.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
+            if (cursor.__baiBaiToolkitHookState && typeof cursor.__baiBaiToolkitHookState === 'object') {
+                cursor.__baiBaiToolkitHookState.rawOriginalFetch = rawOriginalFetch;
+                cursor.__baiBaiToolkitHookState.originalFetch = rawOriginalFetch.bind(globalThis);
+            }
+            return true;
+        }
+        cursor = cursor.__baiBaiToolkitOriginalFetch;
+    }
+    return false;
+}
+
 function installSaveRequestGzipFetchHook() {
     const existing = globalThis[SAVE_REQUEST_GZIP_FETCH_KEY];
-    if (existing?.wrappedFetch) {
+    if (existing?.wrappedFetch && isFetchWrapperInChain(globalThis.fetch, existing.wrappedFetch)) {
+        existing.disabled = false;
         existing.isEnabled = () => settings.saveRequestGzipEnabled !== false;
         return existing;
     }
 
-    const originalFetch = globalThis.fetch;
+    const rawOriginalFetch = globalThis.fetch;
 
-    if (typeof originalFetch !== 'function') {
+    if (typeof rawOriginalFetch !== 'function') {
         return null;
     }
 
     const state = {
-        originalFetch: originalFetch.bind(globalThis),
+        rawOriginalFetch,
+        originalFetch: rawOriginalFetch.bind(globalThis),
         wrappedFetch: null,
+        disabled: false,
         isEnabled: () => settings.saveRequestGzipEnabled !== false,
     };
 
     state.wrappedFetch = async function baiBaiToolkitSaveRequestGzipFetch(input, init) {
+        if (state.disabled || !state.isEnabled()) {
+            return state.originalFetch(input, init);
+        }
+
+        let method;
+        let originalHeaders;
+        let bodyInfo;
+        let compressedInit = null;
+
         try {
-            if (!state.isEnabled()) {
-                return state.originalFetch(input, init);
-            }
-
             const gzipUrl = getSaveRequestGzipUrl(input);
-            if (!gzipUrl) {
-                return state.originalFetch(input, init);
-            }
+            if (gzipUrl) {
+                method = getFetchRequestMethod(input, init);
+                if (['POST', 'PUT', 'PATCH'].includes(method)) {
+                    originalHeaders = buildFetchHeaders(input, init);
+                    if (!originalHeaders.has('Content-Encoding')) {
+                        bodyInfo = await getCompressibleFetchBody(input, init);
+                        if (bodyInfo) {
+                            const compressedBody = await gzipFetchBody(bodyInfo.body, {
+                                method,
+                                path: gzipUrl.pathname,
+                                caller: getPerformanceTraceStackSummary(),
+                            });
+                            if (compressedBody) {
+                                const headers = new Headers(originalHeaders);
+                                if (bodyInfo.contentType && !headers.has('Content-Type')) {
+                                    headers.set('Content-Type', bodyInfo.contentType);
+                                }
+                                headers.set('Content-Encoding', 'gzip');
+                                headers.delete('Content-Length');
 
-            const method = getFetchRequestMethod(input, init);
-            if (!['POST', 'PUT', 'PATCH'].includes(method)) {
-                return state.originalFetch(input, init);
-            }
-
-            const originalHeaders = buildFetchHeaders(input, init);
-            if (originalHeaders.has('Content-Encoding')) {
-                return state.originalFetch(input, init);
-            }
-
-            const bodyInfo = await getCompressibleFetchBody(input, init);
-            if (!bodyInfo) {
-                return state.originalFetch(input, init);
-            }
-
-            const compressedBody = await gzipFetchBody(bodyInfo.body, {
-                method,
-                path: gzipUrl.pathname,
-                caller: getPerformanceTraceStackSummary(),
-            });
-            if (!compressedBody) {
-                return state.originalFetch(input, init);
-            }
-
-            const headers = new Headers(originalHeaders);
-            if (bodyInfo.contentType && !headers.has('Content-Type')) {
-                headers.set('Content-Type', bodyInfo.contentType);
-            }
-            headers.set('Content-Encoding', 'gzip');
-            headers.delete('Content-Length');
-
-            const compressedInit = {
-                ...(init || {}),
-                method,
-                headers,
-                body: compressedBody,
-            };
-
-            try {
-                const response = await state.originalFetch(input, compressedInit);
-                if (!response?.ok) {
-                    console.warn(`${LOG_PREFIX} Gzip save request returned ${response?.status || 'non-OK'}, retrying uncompressed.`);
-                    const retry = buildUncompressedSaveRequestRetry(input, init, method, originalHeaders, bodyInfo);
-                    return state.originalFetch(retry.input, retry.init);
+                                compressedInit = {
+                                    ...(init || {}),
+                                    method,
+                                    headers,
+                                    body: compressedBody,
+                                };
+                            }
+                        }
+                    }
                 }
-                return response;
-            } catch (error) {
-                console.warn(`${LOG_PREFIX} Gzip save request failed, retrying uncompressed:`, error);
-                const retry = buildUncompressedSaveRequestRetry(input, init, method, originalHeaders, bodyInfo);
-                return state.originalFetch(retry.input, retry.init);
             }
         } catch (error) {
             console.warn(`${LOG_PREFIX} Gzip save request skipped:`, error);
             return state.originalFetch(input, init);
         }
+
+        if (!compressedInit) {
+            return state.originalFetch(input, init);
+        }
+
+        // Only retry uncompressed on explicit HTTP 400/415 format/encoding rejection;
+        // never retry network/abort errors or 5xx responses on non-idempotent save mutations.
+        const response = await state.originalFetch(input, compressedInit);
+        if (response?.status === 400 || response?.status === 415) {
+            console.warn(`${LOG_PREFIX} Gzip save request returned ${response.status}, retrying uncompressed.`);
+            const retry = buildUncompressedSaveRequestRetry(input, init, method, originalHeaders, bodyInfo);
+            return state.originalFetch(retry.input, retry.init);
+        }
+        return response;
     };
 
     state.wrappedFetch[SAVE_REQUEST_GZIP_FETCH_KEY] = true;
+    state.wrappedFetch.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
+    state.wrappedFetch.__baiBaiToolkitHookState = state;
     globalThis[SAVE_REQUEST_GZIP_FETCH_KEY] = state;
     globalThis.fetch = state.wrappedFetch;
     return state;
+}
+
+function disableSaveRequestGzipFetchHook() {
+    const existing = globalThis[SAVE_REQUEST_GZIP_FETCH_KEY];
+    if (!existing?.wrappedFetch) {
+        return false;
+    }
+    existing.disabled = true;
+    const spliced = spliceFetchWrapperOut(existing.wrappedFetch, existing.rawOriginalFetch);
+    if (spliced || !isFetchWrapperInChain(globalThis.fetch, existing.wrappedFetch)) {
+        delete globalThis[SAVE_REQUEST_GZIP_FETCH_KEY];
+    }
+    return spliced;
+}
+
+function syncSaveRequestGzipFetchHook() {
+    if (settings.saveRequestGzipEnabled !== false) {
+        return installSaveRequestGzipFetchHook();
+    }
+    disableSaveRequestGzipFetchHook();
+    return null;
 }
 
 function getSaveRequestGzipUrl(input) {
@@ -390,6 +452,7 @@ export {
     buildFetchHeaders,
     buildUncompressedSaveRequestRetry,
     copyFetchRequestOptions,
+    disableSaveRequestGzipFetchHook,
     getCompressibleFetchBody,
     getFetchRequestMethod,
     getFetchRequestUrl,
@@ -401,10 +464,13 @@ export {
     isFetchReadableStream,
     isFetchRequest,
     isFetchUrlSearchParams,
+    isFetchWrapperInChain,
     isLocalOrPrivateHost,
     isLocalOrPrivateIpv4,
     isLocalOrPrivateIpv6,
     normalizeFetchBody,
     normalizeHostname,
     parseIpv4Address,
+    spliceFetchWrapperOut,
+    syncSaveRequestGzipFetchHook,
 };

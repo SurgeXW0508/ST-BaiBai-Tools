@@ -3,8 +3,8 @@ import * as scriptModule from '@sillytavern/script';
 import { eventSource, getCurrentChatId } from '@sillytavern/script';
 import { power_user } from '@sillytavern/scripts/power-user';
 import { PERFORMANCE_TRACE_DEDUPE_MS, PERFORMANCE_TRACE_EVENTS, PERFORMANCE_TRACE_FETCH_KEY, PERFORMANCE_TRACE_FETCH_PATHS, PERFORMANCE_TRACE_INTERACTION_SELECTOR, PERFORMANCE_TRACE_LISTENER_LOG_MS, PERFORMANCE_TRACE_MAX_LINES, PERFORMANCE_TRACE_MAX_LINE_LENGTH, PERFORMANCE_TRACE_SLOW_MS } from './constants.js';
-import { buildFetchHeaders, getFetchRequestMethod, getFetchRequestUrl } from './gzipHook.js';
-import { extensionState } from './state.js';
+import { buildFetchHeaders, getFetchRequestMethod, getFetchRequestUrl, isFetchWrapperInChain, spliceFetchWrapperOut } from './gzipHook.js';
+import { extensionState, settings } from './state.js';
 
 function getPerformanceTraceState() {
     if (!extensionState.performanceTrace || typeof extensionState.performanceTrace !== 'object') {
@@ -84,6 +84,7 @@ function stopPerformanceTraceAndExport() {
 }
 
 function installPerformanceTraceRuntimePatches(state) {
+    installPerformanceTraceFetchHook();
     installPerformanceTraceEventEmitPatch(state);
     installPerformanceTraceJsonStringifyPatch(state);
     installPerformanceTraceResponseJsonPatch(state);
@@ -92,6 +93,7 @@ function installPerformanceTraceRuntimePatches(state) {
 }
 
 function restorePerformanceTraceRuntimePatches(state) {
+    syncPerformanceTraceFetchHook();
     if (state.originalEventEmit) {
         eventSource.emit = state.originalEventEmit;
         state.originalEventEmit = null;
@@ -273,21 +275,27 @@ function installPerformanceTraceInteractionListeners(state) {
 
 function installPerformanceTraceFetchHook() {
     const existing = globalThis[PERFORMANCE_TRACE_FETCH_KEY];
-    if (existing?.wrappedFetch) {
+    if (existing?.wrappedFetch && isFetchWrapperInChain(globalThis.fetch, existing.wrappedFetch)) {
+        existing.disabled = false;
         return existing;
     }
 
-    const originalFetch = globalThis.fetch;
-    if (typeof originalFetch !== 'function') {
+    const rawOriginalFetch = globalThis.fetch;
+    if (typeof rawOriginalFetch !== 'function') {
         return null;
     }
 
     const state = {
-        originalFetch: originalFetch.bind(globalThis),
+        rawOriginalFetch,
+        originalFetch: rawOriginalFetch.bind(globalThis),
         wrappedFetch: null,
+        disabled: false,
     };
 
     state.wrappedFetch = async function baiBaiToolkitPerformanceTraceFetch(input, init) {
+        if (state.disabled) {
+            return state.originalFetch(input, init);
+        }
         const traceState = getPerformanceTraceState();
         const info = traceState.active ? getPerformanceTraceFetchInfo(input, init) : null;
 
@@ -315,9 +323,32 @@ function installPerformanceTraceFetchHook() {
     };
 
     state.wrappedFetch[PERFORMANCE_TRACE_FETCH_KEY] = true;
+    state.wrappedFetch.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
+    state.wrappedFetch.__baiBaiToolkitHookState = state;
     globalThis[PERFORMANCE_TRACE_FETCH_KEY] = state;
     globalThis.fetch = state.wrappedFetch;
     return state;
+}
+
+function disablePerformanceTraceFetchHook() {
+    const existing = globalThis[PERFORMANCE_TRACE_FETCH_KEY];
+    if (!existing?.wrappedFetch) {
+        return false;
+    }
+    existing.disabled = true;
+    const spliced = spliceFetchWrapperOut(existing.wrappedFetch, existing.rawOriginalFetch);
+    if (spliced || !isFetchWrapperInChain(globalThis.fetch, existing.wrappedFetch)) {
+        delete globalThis[PERFORMANCE_TRACE_FETCH_KEY];
+    }
+    return spliced;
+}
+
+function syncPerformanceTraceFetchHook() {
+    if (getPerformanceTraceState().active === true || settings.performanceTraceEnabled === true) {
+        return installPerformanceTraceFetchHook();
+    }
+    disablePerformanceTraceFetchHook();
+    return null;
 }
 
 function recordPerformanceTraceEvent(event, args, duration, listenerCount = 0) {
@@ -1002,6 +1033,7 @@ function formatTraceBytes(value) {
 export {
     appendPerformanceTraceLine,
     buildPerformanceTraceExport,
+    disablePerformanceTraceFetchHook,
     downloadTextFile,
     formatTraceBytes,
     formatTraceMs,
@@ -1049,6 +1081,7 @@ export {
     summarizeResponseJsonResult,
     summarizeTraceArg,
     summarizeTraceArgs,
+    syncPerformanceTraceFetchHook,
     updatePerformanceTraceControls,
     updatePerformanceTraceStats,
 };

@@ -2,11 +2,11 @@
 // 与独立版的区别:不注入自己的魔法棒菜单(共用柏宝箱的「楼层管理器」入口)、
 // 不做独立更新检查、Vue App 第一次打开时才挂载(开了悬浮球则启动即挂载)。
 import App from '@pen/App.vue';
-import { initializePenSettings, penSettings } from '@pen/api/settings';
+import { initializePenSettings, penSettings, teardownPenSettings } from '@pen/api/settings';
 import { initializeSharedChannels, teardownSharedChannels } from '@pen/api/sharedChannels';
 import { bindEditButtons, unbindEditButtons } from '@pen/editButton';
 import { openPenFromMenu } from '@pen/menu';
-import { closePen, ui } from '@pen/state/ui';
+import { closePen, resetPenUiState, ui } from '@pen/state/ui';
 import { guardEditableArrowKeys } from '@pen/st/keyboard';
 import { versionedAssetUrl } from '@pen/version';
 import '@pen/styles/base.css';
@@ -17,13 +17,12 @@ import { createApp, watch, type App as VueApp, type WatchStopHandle } from 'vue'
 const HOST_ID = 'bby-app-host';
 
 let started = false;
+let startRunId = 0;
 let app: VueApp | null = null;
 let mountWatchStop: WatchStopHandle | null = null;
-let pagehideBound = false;
 
-function handlePageHide(): void {
-  app?.unmount();
-  app = null;
+export function resetPenRuntimeState(): void {
+  resetPenUiState();
 }
 
 function ensureMounted(): void {
@@ -49,11 +48,6 @@ function ensureMounted(): void {
   shadow.appendChild(container);
   app = createApp(App);
   app.mount(container);
-
-  if (!pagehideBound && typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
-    pagehideBound = true;
-    window.addEventListener('pagehide', handlePageHide, { once: true });
-  }
 }
 
 // 菜单和编辑区按钮都只改 ui 状态;第一次打开时在这里同步挂载 App。
@@ -71,25 +65,27 @@ function ensureMountWatch(): void {
 export function startPen(): void {
   if (started) return;
   started = true;
+  const runId = ++startRunId;
   ensureMountWatch();
   bindEditButtons();
-  void Promise.all([initializeSharedChannels(), initializePenSettings()]).then(syncMount);
+  void Promise.all([initializeSharedChannels(), initializePenSettings()]).then(() => {
+    if (started && runId === startRunId) syncMount();
+  });
 }
 
 export function stopPen(): void {
   if (!started) return;
   started = false;
+  startRunId += 1;
   mountWatchStop?.();
   mountWatchStop = null;
   teardownSharedChannels();
+  teardownPenSettings();
   unbindEditButtons();
   closePen();
+  resetPenRuntimeState();
   app?.unmount();
   app = null;
-  if (pagehideBound && typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
-    window.removeEventListener('pagehide', handlePageHide);
-    pagehideBound = false;
-  }
   document.getElementById(HOST_ID)?.remove();
 }
 

@@ -1298,9 +1298,10 @@ test('Built-in Pen (floorManager) Feature Off, standalone-coexistence, and .giti
     assert.match(penEntry, /versionedAssetUrl\('\.\/index\.css',\s*import\.meta\.url\)/, 'Pen Shadow root CSS path contract');
     assert.match(
         penEntry,
-        /export function stopPen\(\)[\s\S]*?mountWatchStop\?\.\(\)[\s\S]*?teardownSharedChannels\(\)[\s\S]*?unbindEditButtons\(\)[\s\S]*?closePen\(\)[\s\S]*?app\?\.unmount\(\)[\s\S]*?document\.getElementById\(HOST_ID\)\?\.remove\(\)/,
-        'stopPen() must tear down mountWatchStop, sharedChannels listener, editButtons rAF/observer, Vue app, and Shadow host',
+        /export function stopPen\(\)[\s\S]*?mountWatchStop\?\.\(\)[\s\S]*?teardownSharedChannels\(\)[\s\S]*?teardownPenSettings\(\)[\s\S]*?unbindEditButtons\(\)[\s\S]*?resetPenRuntimeState\(\)[\s\S]*?app\?\.unmount\(\)[\s\S]*?document\.getElementById\(HOST_ID\)\?\.remove\(\)/,
+        'stopPen() must tear down mountWatchStop, sharedChannels, penSettings, editButtons, runtime UI state, Vue app, and Shadow host',
     );
+    assert.equal(penEntry.includes('pagehide'), false, 'src/pen/index.ts must not register bfcache-breaking pagehide listener');
     assert.equal(distBundle.includes('generateRaw'), false, 'dist/index.js must not invoke ST generateRaw (protects TempResponseLength & Vertex)');
     assert.equal(distBundle.includes('跟随主 API'), false, 'dist/index.js must not expose 跟随主 API in personal build');
     assert.equal(clientSrc.includes('generateRaw'), false, 'src/pen/api/client.ts must not invoke generateRaw');
@@ -1313,12 +1314,16 @@ test('Built-in Pen (floorManager) Feature Off, standalone-coexistence, and .giti
         );
     }
     assert.match(clientSrc, /filterExcludeParams\(channel\.excludeParams\)/, 'client.ts must sanitize excludeParams via filterExcludeParams');
-    assert.match(clientSrc, /requireValidSideChannelBaseUrl\(rawUrl\)/, 'client.ts must delegate URL validation to requireValidSideChannelBaseUrl');
+    assert.match(clientSrc, /requireValidSideChannelBaseUrl\(rawUrl,\s*\{\s*appendDefaultV1\s*\}\)/, 'client.ts must delegate URL validation to requireValidSideChannelBaseUrl');
     assert.match(clientSrc, /resolveValidEndpointUrl\(channel\.url\)/, 'client.ts must validate channel.url via resolveValidEndpointUrl');
+    assert.match(clientSrc, /function parseJsonCompletion\(data: unknown\)/, 'client.ts must detect non-streaming HTTP 200 { error } envelopes');
     assert.match(chatPersistenceSrc, /\/api\/chats\/save/, 'chatPersistence.ts must verify single-chat save endpoint');
     assert.match(chatPersistenceSrc, /\/api\/chats\/group\/save/, 'chatPersistence.ts must verify group-chat save endpoint');
+    assert.match(chatPersistenceSrc, /DecompressionStream\('gzip'\)/, 'chatPersistence.ts must decompress gzipped save request bodies when matching chat identity');
     assert.match(floorActionsSrc, /captureDeleteSnapshot/, 'floorActions.ts must lock target snapshot before delete confirmation');
     assert.match(floorActionsSrc, /isSameChatTarget/, 'floorActions.ts must re-verify chat identity after confirmation');
+    assert.match(floorActionsSrc, /prepareNativeEditorsBeforeSlashAction/, 'floorActions.ts must protect native #curEditTextarea before /hide or /del');
+    assert.match(floorActionsSrc, /\/del toolcalls=false \$\{snapshot\.deleteCount\}/, 'floorActions.ts must pass toolcalls=false with effective deleteCount');
 
     // 3. Execute src/floorManager.js in an isolated VM context to verify Feature Off & standalone Pen coexistence
     const floorManagerCode = await readFile(path.join(repoRoot, 'src', 'floorManager.js'), 'utf8');
@@ -1387,4 +1392,297 @@ test('Built-in Pen (floorManager) Feature Off, standalone-coexistence, and .giti
     assert.deepEqual(calls, [['startPen'], ['openPenWindow']]);
 });
 
+test('WP-4 retired dead modules, True Feature Off fetch-hook splicing, gzip 400/415-only retry, and __baibaokuEarlyBridge boot hydration', async () => {
+    const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+    // 1. Dead fastBootstrap & retired keyboard-scan / Save Generate absence checks
+    assert.equal(fs.existsSync(path.join(repoRoot, 'src', 'features', 'fastBootstrap.js')), false, 'fastBootstrap.js must be deleted');
+    const [distBundle, entrySrc, constantsSrc, settingsHtml] = await Promise.all([
+        readFile(path.join(repoRoot, 'dist', 'index.js'), 'utf8'),
+        readFile(path.join(repoRoot, 'src', 'index.js'), 'utf8'),
+        readFile(path.join(repoRoot, 'src', 'features', 'constants.js'), 'utf8'),
+        readFile(path.join(repoRoot, 'src', 'settings.html'), 'utf8'),
+    ]);
+    for (const removedSymbol of ['FAST_SETTINGS_BOOTSTRAP_FETCH_KEY', 'FAST_CHARACTER_LIST_FETCH_KEY', 'fetchFastCharacterChatList', 'fastBootstrap']) {
+        assert.equal(entrySrc.includes(removedSymbol), false, `src/index.js must not reference ${removedSymbol}`);
+        assert.equal(constantsSrc.includes(removedSymbol), false, `src/features/constants.js must not define ${removedSymbol}`);
+        assert.equal(distBundle.includes(removedSymbol), false, `dist/index.js must not bundle ${removedSymbol}`);
+    }
+    assert.match(
+        settingsHtml,
+        /id="bai_bai_toolkit_chat_keyboard_scan_reduction_enabled"[\s\S]*?disabled[\s\S]*?减少酒馆键盘扫描（Personal Stable 已禁用）/,
+        'src/settings.html must lock retired keyboard scan toggle as disabled in Personal Stable',
+    );
+    assert.equal(distBundle.includes('BAIBAOKU_SAVE_GENERATE_DISCARD_URL'), false, 'Save Generate must remain un-bundled in dist/index.js');
+
+    // 2. state.js boot hydration from __baibaokuEarlyBridge & baibaokuOwnedSettingKeys persistence strip
+    {
+        const extSettings = {
+            baiBaiToolkit: {
+                chatKeyboardScanReductionEnabled: true,
+                fastCharacterListEnabled: true,
+                tokenizerBulkCountEnabled: true,
+                baibaokuSettingsAccelerationEnabled: true,
+                baibaokuLazyThemeLoadingEnabled: true,
+                extensionManifestBundleEnabled: true,
+                recentChatListAccelerationEnabled: true,
+                saveRequestGzipEnabled: false,
+            },
+        };
+        let saveCount = 0;
+        const stateCtx = vm.createContext({
+            console,
+            URL,
+            __baibaokuEarlyBridge: {
+                isSettingsAccelerationEnabled: () => false,
+                isLazyThemeLoadingEnabled: () => false,
+                isExtensionManifestBundleEnabled: () => false,
+                isCharacterListAccelerationEnabled: () => false,
+                isRecentChatListAccelerationEnabled: () => false,
+                isTokenizerBulkCountEnabled: () => false,
+            },
+        });
+        stateCtx.globalThis = stateCtx;
+        stateCtx.window = stateCtx;
+        const stateMod = await loadVmModule('../src/features/state.js', stateCtx, {
+            '@sillytavern/script': { saveSettingsDebounced: () => { saveCount += 1; } },
+            '@sillytavern/scripts/extensions': { extension_settings: extSettings },
+            './constants.js': { EXTENSION_KEY: 'bai-bai-toolkit', SETTINGS_KEY: 'baiBaiToolkit' },
+        });
+        stateMod.initializeSettings();
+        assert.equal(stateMod.settings.chatKeyboardScanReductionEnabled, false, 'chatKeyboardScanReductionEnabled must stay forced false');
+        assert.equal(stateMod.settings.baibaokuSettingsAccelerationEnabled, false, '__baibaokuEarlyBridge hydrates baibaokuSettingsAccelerationEnabled');
+        assert.equal(stateMod.settings.baibaokuLazyThemeLoadingEnabled, false, '__baibaokuEarlyBridge hydrates baibaokuLazyThemeLoadingEnabled');
+        assert.equal(stateMod.settings.extensionManifestBundleEnabled, false, '__baibaokuEarlyBridge hydrates extensionManifestBundleEnabled');
+        assert.equal(stateMod.settings.fastCharacterListEnabled, false, '__baibaokuEarlyBridge hydrates fastCharacterListEnabled');
+        assert.equal(stateMod.settings.recentChatListAccelerationEnabled, false, '__baibaokuEarlyBridge hydrates recentChatListAccelerationEnabled');
+        assert.equal(stateMod.settings.tokenizerBulkCountEnabled, false, '__baibaokuEarlyBridge hydrates tokenizerBulkCountEnabled');
+        assert.equal(stateMod.settings.saveRequestGzipEnabled, false, 'frontend-owned setting preserved');
+
+        saveCount = 0;
+        stateMod.saveExtensionSettings();
+        assert.equal(saveCount, 1);
+        for (const strippedKey of [
+            'baibaokuSettingsAccelerationEnabled',
+            'baibaokuLazyThemeLoadingEnabled',
+            'extensionManifestBundleEnabled',
+            'fastCharacterListEnabled',
+            'recentChatListAccelerationEnabled',
+            'tokenizerBulkCountEnabled',
+            'chatKeyboardScanReductionEnabled',
+        ]) {
+            assert.equal(
+                Object.prototype.hasOwnProperty.call(extSettings.baiBaiToolkit, strippedKey),
+                false,
+                `extension_settings.baiBaiToolkit must strip ${strippedKey}`,
+            );
+        }
+    }
+
+    // 3. gzipHook.js True Feature Off splicing + HTTP 400/415-only uncompressed retry
+    {
+        const calls = [];
+        let nextBehavior = () => new Response(JSON.stringify({ ok: true }), { status: 200 });
+        const baseFetch = async (input, init) => {
+            const headers = new Headers(init?.headers || (input instanceof Request ? input.headers : undefined));
+            calls.push({ url: String(input), encoding: headers.get('content-encoding'), body: init?.body });
+            return nextBehavior(calls.length);
+        };
+        const gzipSettings = { saveRequestGzipEnabled: false };
+        const gzipCtx = vm.createContext({
+            console: { debug: () => {}, warn: () => {} },
+            CompressionStream,
+            Response,
+            Request,
+            Headers,
+            URL,
+            URLSearchParams,
+            Blob,
+            FormData,
+            ReadableStream,
+            ArrayBuffer,
+            Uint8Array,
+            performance,
+            fetch: baseFetch,
+            location: { origin: 'https://st.example.com', href: 'https://st.example.com/' },
+        });
+        gzipCtx.globalThis = gzipCtx;
+        gzipCtx.window = gzipCtx;
+
+        const gzipMod = await loadVmModule('../src/features/gzipHook.js', gzipCtx, {
+            './constants.js': {
+                LOG_PREFIX: '[test]',
+                SAVE_REQUEST_GZIP_FETCH_KEY: '__baiBaiToolkitSaveRequestGzipFetch',
+                SAVE_REQUEST_GZIP_PATHS: new Set(['/api/chats/save']),
+            },
+            './perfTrace.js': {
+                getPerformanceTraceStackSummary: () => '',
+                recordPerformanceTraceGzipCompression: () => {},
+            },
+            './state.js': { settings: gzipSettings },
+        });
+
+        // Disabled at boot -> never wraps globalThis.fetch
+        gzipMod.syncSaveRequestGzipFetchHook();
+        assert.equal(gzipCtx.fetch, baseFetch, 'Disabled gzipHook must leave globalThis.fetch untouched');
+
+        // Enabled -> wraps globalThis.fetch
+        gzipSettings.saveRequestGzipEnabled = true;
+        gzipMod.syncSaveRequestGzipFetchHook();
+        const installedGzipFetch = gzipCtx.fetch;
+        assert.notEqual(installedGzipFetch, baseFetch, 'Enabled gzipHook must wrap globalThis.fetch');
+
+        // Stacked outer wrapper -> disabling gzipHook splices out from middle cleanly
+        const outerState = { rawOriginalFetch: installedGzipFetch };
+        const outerWrapper = function (...args) {
+            return outerWrapper.__baiBaiToolkitOriginalFetch.apply(this, args);
+        };
+        outerWrapper.__baiBaiToolkitOriginalFetch = installedGzipFetch;
+        outerWrapper.__baiBaiToolkitHookState = outerState;
+        gzipCtx.fetch = outerWrapper;
+
+        gzipSettings.saveRequestGzipEnabled = false;
+        gzipMod.syncSaveRequestGzipFetchHook();
+        assert.equal(gzipCtx.fetch, outerWrapper, 'Outer wrapper stays intact when inner gzipHook is disabled');
+        assert.equal(outerWrapper.__baiBaiToolkitOriginalFetch, baseFetch, 'Inner gzipHook spliced out cleanly');
+        assert.equal(outerState.rawOriginalFetch, baseFetch, 'Outer hookState.rawOriginalFetch updated cleanly');
+
+        // Reset to clean gzipHook for retry policy checks
+        gzipCtx.fetch = baseFetch;
+        gzipSettings.saveRequestGzipEnabled = true;
+        gzipMod.syncSaveRequestGzipFetchHook();
+
+        // 415 Unsupported Media Type -> retries once uncompressed
+        calls.length = 0;
+        nextBehavior = attempt => attempt === 1
+            ? new Response('Unsupported Media Type', { status: 415 })
+            : new Response(JSON.stringify({ ok: true }), { status: 200 });
+        const res415 = await gzipCtx.fetch('/api/chats/save', { method: 'POST', body: JSON.stringify({ chat: [] }) });
+        assert.equal(res415.status, 200);
+        assert.equal(calls.length, 2, 'HTTP 415 must trigger uncompressed fallback retry');
+        assert.equal(calls[0].encoding, 'gzip');
+        assert.equal(calls[1].encoding, null);
+
+        // 500 Internal Server Error -> MUST NOT retry uncompressed
+        calls.length = 0;
+        nextBehavior = () => new Response('Disk full', { status: 500 });
+        const res500 = await gzipCtx.fetch('/api/chats/save', { method: 'POST', body: JSON.stringify({ chat: [] }) });
+        assert.equal(res500.status, 500);
+        assert.equal(calls.length, 1, 'HTTP 500 must NEVER double-POST uncompressed');
+
+        // Post-dispatch network TypeError -> MUST NOT retry uncompressed
+        calls.length = 0;
+        nextBehavior = () => Promise.reject(new TypeError('Failed to fetch'));
+        await assert.rejects(
+            () => gzipCtx.fetch('/api/chats/save', { method: 'POST', body: JSON.stringify({ chat: [] }) }),
+            /Failed to fetch/,
+        );
+        assert.equal(calls.length, 1, 'Post-dispatch network rejection must NEVER double-POST uncompressed');
+    }
+
+    // 4. generateRetry.js, perfTrace.js, chatList.js & welcomeRecent.js True Feature Off checks
+    {
+        const baseFetch = async () => new Response('{}', { status: 200 });
+        const listeners = new Map();
+        const eventSource = {
+            on: (evt, fn) => { listeners.set(evt, (listeners.get(evt) || 0) + 1); eventSource.__lastFn = fn; },
+            removeListener: evt => { listeners.set(evt, Math.max(0, (listeners.get(evt) || 0) - 1)); },
+        };
+        const retrySettings = { generateRetryEnabled: false, generateBlacklistEnabled: false, generateSoundEnabled: false };
+        const retryCtx = vm.createContext({
+            console: { debug: () => {}, warn: () => {}, info: () => {} },
+            fetch: baseFetch,
+            setTimeout,
+            clearTimeout,
+            Headers,
+            Request,
+            Response,
+            URL,
+            location: { origin: 'https://st.example.com' },
+        });
+        retryCtx.globalThis = retryCtx;
+        retryCtx.window = retryCtx;
+
+        const retryMod = await loadVmModule('../src/features/generateRetry.js', retryCtx, {
+            '@sillytavern/script': {
+                eventSource,
+                event_types: { GENERATION_STARTED: 'gs', GENERATION_STOPPED: 'gx', GENERATION_ENDED: 'ge', CHAT_CHANGED: 'cc', CHARACTER_MESSAGE_RENDERED: 'cmr', USER_MESSAGE_RENDERED: 'umr', MESSAGE_SWIPED: 'ms', MESSAGE_UPDATED: 'mu' },
+            },
+            './constants.js': featureConstants,
+            './generateRequest.js': generateRequest,
+            './generationLifecycle.js': {
+                getGenerationStopEpoch: () => 0,
+                isCurrentGenerationStopped: () => false,
+                subscribeGenerationStop: () => () => {},
+            },
+            './gzipHook.js': gzipHook,
+            './state.js': { extensionState: {}, settings: retrySettings },
+            './util.js': featureUtil,
+        });
+
+        retryMod.syncGenerateRetryFetchHook();
+        assert.equal(retryCtx.fetch, baseFetch, 'Disabled generateRetry must not wrap fetch');
+        assert.equal([...listeners.values()].reduce((a, b) => a + b, 0), 0, 'Disabled generateRetry must attach zero ST listeners');
+
+        retrySettings.generateRetryEnabled = true;
+        retryMod.syncGenerateRetryFetchHook();
+        assert.notEqual(retryCtx.fetch, baseFetch, 'Enabling generateRetry installs fetch hook');
+        assert.equal([...listeners.values()].reduce((a, b) => a + b, 0) > 0, true, 'Enabling generateRetry attaches ST lifecycle listeners');
+
+        retrySettings.generateRetryEnabled = false;
+        retryMod.syncGenerateRetryFetchHook();
+        assert.equal(retryCtx.fetch, baseFetch, 'Disabling generateRetry splices out fetch hook');
+        assert.equal([...listeners.values()].reduce((a, b) => a + b, 0), 0, 'Disabling generateRetry removes ST lifecycle listeners');
+    }
+
+    {
+        const baseFetch = async () => new Response('{}', { status: 200 });
+        const removedClicks = [];
+        const addedClicks = [];
+        const chatState = {};
+        const chatSettings = { fastChatListEnabled: false, welcomeRecentChatDirectOpenEnabled: true };
+        const chatCtx = vm.createContext({
+            console: { debug: () => {}, warn: () => {} },
+            fetch: baseFetch,
+            Headers,
+            Request,
+            Response,
+            URL,
+            location: { origin: 'https://st.example.com' },
+            document: {
+                getElementById: () => null,
+                addEventListener: (type, fn, cap) => { addedClicks.push([type, fn, cap]); },
+                removeEventListener: (type, fn, cap) => { removedClicks.push([type, fn, cap]); },
+            },
+        });
+        chatCtx.globalThis = chatCtx;
+        chatCtx.window = chatCtx;
+
+        const chatListMod = await loadVmModule('../src/chat/chatList.js', chatCtx, {
+            '@sillytavern/script': { getRequestHeaders: () => ({}) },
+            './constants.js': chatConstants,
+            './state.js': { LOG_PREFIX: '[test]', extensionState: chatState, settings: chatSettings },
+        });
+        chatListMod.applyFastChatListFetchOptimization();
+        assert.equal(chatCtx.fetch, baseFetch, 'Disabled fastChatListEnabled must not wrap fetch');
+        chatSettings.fastChatListEnabled = true;
+        chatListMod.applyFastChatListFetchOptimization();
+        assert.notEqual(chatCtx.fetch, baseFetch, 'Enabled fastChatListEnabled wraps fetch');
+        chatSettings.fastChatListEnabled = false;
+        chatListMod.applyFastChatListFetchOptimization();
+        assert.equal(chatCtx.fetch, baseFetch, 'Disabling fastChatListEnabled restores fetch');
+
+        const welcomeMod = await loadVmModule('../src/chat/welcomeRecent.js', chatCtx, {
+            '@sillytavern/script': { characters: [], getCurrentChatId: () => '', openCharacterChat: async () => {}, saveSettingsDebounced: () => {}, selectCharacterById: async () => {}, setActiveCharacter: () => {}, this_chid: undefined },
+            '@sillytavern/scripts/i18n': { t: s => s },
+            './constants.js': chatConstants,
+            './hostAliases.js': { createOrEditCharacter: () => {}, unshallowCharacter: async () => {} },
+            './state.js': { LOG_PREFIX: '[test]', extensionState: chatState, settings: chatSettings },
+        });
+        welcomeMod.applyWelcomeRecentChatDirectOpenOptimization();
+        assert.equal(addedClicks.length, 1, 'Enabled welcomeRecentChatDirectOpen attaches capture click listener');
+        chatSettings.welcomeRecentChatDirectOpenEnabled = false;
+        welcomeMod.applyWelcomeRecentChatDirectOpenOptimization();
+        assert.equal(removedClicks.length, 1, 'Disabled welcomeRecentChatDirectOpen removes capture click listener');
+    }
+});

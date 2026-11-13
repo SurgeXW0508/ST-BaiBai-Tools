@@ -1,6 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { nextTick } from 'vue';
 
-import { DEFAULT_QUICK_PHRASES, normalizePenSettings } from '@pen/api/settings';
+import {
+  DEFAULT_QUICK_PHRASES,
+  initializePenSettings,
+  normalizePenSettings,
+  penSettings,
+  teardownPenSettings,
+} from '@pen/api/settings';
+
+afterEach(() => {
+  teardownPenSettings();
+  vi.unstubAllGlobals();
+});
 
 describe('theme settings', () => {
   it('restores a persisted theme', () => {
@@ -131,5 +143,55 @@ describe('replace rules', () => {
         ],
       }).replaceRules,
     ).toEqual([customRule]);
+  });
+});
+
+describe('P-6：initializePenSettings 无差异零落盘与 teardownPenSettings 定时器回收', () => {
+  it('已规范化配置在启动时绝不无故触发 saveSettingsDebounced，仅在迁移修补时才落盘', async () => {
+    const cleanStored = JSON.parse(JSON.stringify(normalizePenSettings({})));
+    const saveSettingsDebounced = vi.fn();
+    const extensionSettings: Record<string, unknown> = { baibai_pen: cleanStored };
+
+    vi.stubGlobal('window', {
+      setTimeout,
+      clearTimeout,
+      SillyTavern: {
+        getContext: () => ({
+          extensionSettings,
+          saveSettingsDebounced,
+        }),
+      },
+    });
+
+    await initializePenSettings();
+    await nextTick();
+    expect(saveSettingsDebounced).not.toHaveBeenCalled();
+
+    penSettings.theme = 'night';
+    await nextTick();
+    expect(saveSettingsDebounced).toHaveBeenCalledTimes(1);
+
+    saveSettingsDebounced.mockClear();
+    teardownPenSettings();
+    extensionSettings.baibai_pen = { theme: 'unknown-legacy-theme' };
+    await initializePenSettings();
+    await nextTick();
+    expect(saveSettingsDebounced).toHaveBeenCalledOnce();
+  });
+
+  it('teardownPenSettings 立即取消等待 extensionSettings 的轮询定时器', async () => {
+    const clearSpy = vi.fn(clearTimeout);
+    vi.stubGlobal('window', {
+      setTimeout,
+      clearTimeout: clearSpy,
+      SillyTavern: {
+        getContext: () => ({}),
+      },
+    });
+
+    const pending = initializePenSettings();
+    teardownPenSettings();
+    await pending;
+    expect(clearSpy).toHaveBeenCalled();
   });
 });

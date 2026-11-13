@@ -65,7 +65,8 @@ function applyBaibaokuPanelLocalState(container) {
     container.find('#bai_bai_toolkit_tokenizer_bulk_count_enabled')
         .prop('checked', settings.tokenizerBulkCountEnabled !== false);
     container.find('#bai_bai_toolkit_chat_keyboard_scan_reduction_enabled')
-        .prop('checked', settings.chatKeyboardScanReductionEnabled !== false);
+        .prop('checked', false)
+        .prop('disabled', true);
 
     applyCachedBaibaokuPanelStatus(container, getBaibaokuPanelState().cache);
     applyPresetAutoBackupToggleAvailability(container, getBaibaokuPanelState().cache?.status);
@@ -211,13 +212,8 @@ async function refreshBaibaokuPanelStatus(container, { force = false } = {}) {
         tokenizerBulkCountToggle.prop('checked', bridgeTokenizerBulkCountEnabled);
     }
 
-    const bridgeChatKeyboardScanReductionEnabled = typeof bridge?.isChatKeyboardScanReductionEnabled === 'function'
-        ? bridge.isChatKeyboardScanReductionEnabled()
-        : null;
-    if (typeof bridgeChatKeyboardScanReductionEnabled === 'boolean') {
-        settings.chatKeyboardScanReductionEnabled = bridgeChatKeyboardScanReductionEnabled;
-        chatKeyboardScanReductionToggle.prop('checked', bridgeChatKeyboardScanReductionEnabled);
-    }
+    settings.chatKeyboardScanReductionEnabled = false;
+    chatKeyboardScanReductionToggle.prop('checked', false).prop('disabled', true);
 
     updateBaibaokuStatusText(serverStatus, '检测中', null);
     updateBaibaokuStatusText(driverStatus, '检测中', null);
@@ -248,7 +244,6 @@ async function refreshBaibaokuPanelStatus(container, { force = false } = {}) {
             const recentChatListEnabled = config.recentChatListAccelerationEnabled !== false;
             const progressiveChatLoadingEnabled = false;
             const tokenizerBulkCountEnabled = config.tokenizerBulkCountEnabled !== false;
-            const chatKeyboardScanReductionEnabled = config.chatKeyboardScanReductionEnabled !== false;
             panelState.cache = {
                 ...(panelState.cache || {}),
                 config,
@@ -262,7 +257,7 @@ async function refreshBaibaokuPanelStatus(container, { force = false } = {}) {
             settings.recentChatListAccelerationEnabled = recentChatListEnabled;
             settings.progressiveChatLoadingEnabled = progressiveChatLoadingEnabled;
             settings.tokenizerBulkCountEnabled = tokenizerBulkCountEnabled;
-            settings.chatKeyboardScanReductionEnabled = chatKeyboardScanReductionEnabled;
+            settings.chatKeyboardScanReductionEnabled = false;
             accelerationToggle.prop('checked', settingsEnabled);
             lazyThemeLoadingToggle.prop('checked', lazyThemeLoadingEnabled);
             extensionManifestBundleToggle.prop('checked', extensionManifestBundleEnabled);
@@ -270,7 +265,7 @@ async function refreshBaibaokuPanelStatus(container, { force = false } = {}) {
             recentChatListToggle.prop('checked', recentChatListEnabled);
             progressiveChatLoadingToggle.prop('checked', false).prop('disabled', true);
             tokenizerBulkCountToggle.prop('checked', tokenizerBulkCountEnabled);
-            chatKeyboardScanReductionToggle.prop('checked', chatKeyboardScanReductionEnabled);
+            chatKeyboardScanReductionToggle.prop('checked', false).prop('disabled', true);
             applyFastChatGetOptimization();
             if (typeof bridge?.setSettingsAccelerationEnabled === 'function') {
                 bridge.setSettingsAccelerationEnabled(settingsEnabled);
@@ -304,11 +299,6 @@ async function refreshBaibaokuPanelStatus(container, { force = false } = {}) {
                 bridge.setTokenizerBulkCountEnabled(tokenizerBulkCountEnabled);
             } else if (bridge) {
                 bridge.tokenizerBulkCountEnabled = tokenizerBulkCountEnabled;
-            }
-            if (typeof bridge?.setChatKeyboardScanReductionEnabled === 'function') {
-                bridge.setChatKeyboardScanReductionEnabled(chatKeyboardScanReductionEnabled);
-            } else if (bridge) {
-                bridge.chatKeyboardScanReductionEnabled = chatKeyboardScanReductionEnabled;
             }
         } catch (error) {
             console.debug(`${LOG_PREFIX} Failed to read BaiBaoKu fast config`, error);

@@ -1,6 +1,6 @@
 import { getContext } from '@pen/st/context';
 import type { ThemeName } from '@pen/state/ui';
-import { reactive, watch } from 'vue';
+import { nextTick, reactive, watch } from 'vue';
 
 export interface QuickPhrase {
   id: number;
@@ -278,6 +278,27 @@ export function normalizePenSettings(raw: unknown): PenSettings {
 export const penSettings = reactive<PenSettings>(defaults());
 
 let ready = false;
+let hydrating = false;
+let initRunId = 0;
+let retryTimer = 0;
+let retryResolve: (() => void) | null = null;
+
+function clearRetryWait(): void {
+  if (retryTimer) {
+    window.clearTimeout(retryTimer);
+    retryTimer = 0;
+  }
+  const resolve = retryResolve;
+  retryResolve = null;
+  resolve?.();
+}
+
+export function teardownPenSettings(): void {
+  initRunId += 1;
+  clearRetryWait();
+  hydrating = false;
+  ready = false;
+}
 
 function persist(): void {
   const context = getContext();
@@ -286,26 +307,64 @@ function persist(): void {
   context.saveSettingsDebounced?.();
 }
 
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(item => stableJson(item)).join(',')}]`;
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record)
+    .filter(key => record[key] !== undefined)
+    .sort();
+  return `{${keys.map(key => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(',')}}`;
+}
+
 export async function initializePenSettings(): Promise<void> {
   if (ready) return;
+  const runId = ++initRunId;
+  clearRetryWait();
   for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (runId !== initRunId) return;
     const context = getContext();
     if (context?.extensionSettings) {
-      Object.assign(penSettings, normalizePenSettings(context.extensionSettings[SETTINGS_KEY]));
-      context.extensionSettings[SETTINGS_KEY] = JSON.parse(JSON.stringify(penSettings));
-      context.saveSettingsDebounced?.();
+      const rawExisting = context.extensionSettings[SETTINGS_KEY];
+      const normalized = normalizePenSettings(rawExisting);
+      hydrating = true;
+      try {
+        Object.assign(penSettings, normalized);
+        await nextTick();
+      } finally {
+        hydrating = false;
+      }
+      if (runId !== initRunId) return;
+      const serialized = JSON.parse(JSON.stringify(penSettings));
+      const changed = stableJson(rawExisting) !== stableJson(serialized);
+      context.extensionSettings[SETTINGS_KEY] = serialized;
+      if (changed) {
+        context.saveSettingsDebounced?.();
+      }
       ready = true;
       return;
     }
-    await new Promise(resolve => window.setTimeout(resolve, 250));
+    await new Promise<void>(resolve => {
+      retryResolve = resolve;
+      retryTimer = window.setTimeout(() => {
+        retryTimer = 0;
+        retryResolve = null;
+        resolve();
+      }, 250);
+    });
   }
+  if (runId !== initRunId) return;
   ready = true;
 }
 
 watch(
   penSettings,
   () => {
-    if (ready) persist();
+    if (ready && !hydrating) persist();
   },
   { deep: true },
 );

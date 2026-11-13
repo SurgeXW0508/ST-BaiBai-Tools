@@ -185,6 +185,9 @@ export async function rewriteCurrentFloor(request: RewriteRequest): Promise<Rewr
       includeUserDescription: request.includeUserDescription,
     },
   );
+  if (request.signal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError');
+  }
   const messages: ChatMessage[] = [];
   // 破限:置顶 system,降低拒答率(与柏宝书一致)
   const jailbreak = resolvePrompt(penSettings.prompts.jailbreak, JAILBREAK_PROMPT);

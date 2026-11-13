@@ -5,7 +5,7 @@ import { bindPresetBackupRetentionSettings } from '../preset/backupRetention.js'
 import settingsTemplateHtml from '../settings.html?raw';
 import * as worldInfoPageOptimization from '../worldinfo/index.js';
 import { renderExtensionTemplateAsync } from '@sillytavern/scripts/extensions';
-import { setBaibaokuCharacterListAccelerationEnabled, setBaibaokuChatKeyboardScanReductionEnabled, setBaibaokuExtensionManifestBundleEnabled, setBaibaokuLazyThemeLoadingEnabled, setBaibaokuProgressiveChatLoadingEnabled, setBaibaokuRecentChatListAccelerationEnabled, setBaibaokuSettingsAccelerationEnabled, setBaibaokuTokenizerBulkCountEnabled } from './backendToggles.js';
+import { setBaibaokuCharacterListAccelerationEnabled, setBaibaokuExtensionManifestBundleEnabled, setBaibaokuLazyThemeLoadingEnabled, setBaibaokuProgressiveChatLoadingEnabled, setBaibaokuRecentChatListAccelerationEnabled, setBaibaokuSettingsAccelerationEnabled, setBaibaokuTokenizerBulkCountEnabled } from './backendToggles.js';
 import { applyBaibaokuPanelLocalState, initializeBaibaokuPanel } from './baibaokuPanel.js';
 import { applyCharacterListAvatarLazyLoadOptimization, applyCharacterSearchInputOptimization } from './characterList.js';
 import { LOG_PREFIX } from './constants.js';
@@ -14,9 +14,10 @@ import { applyDescriptionCodeMirrorEditorOptimization } from './descEditor.js';
 import { initializeExtensionInstallOptimization } from './extensionInstallOptimization.js';
 import { applyFastChatGetOptimization } from './fastChat.js';
 import { bindGenerateBlacklistRetrySettings } from './generateBlacklistRetry.js';
-import { bindGenerateRetrySettings } from './generateRetry.js';
+import { bindGenerateRetrySettings, syncGenerateRetryFetchHook } from './generateRetry.js';
+import { syncSaveRequestGzipFetchHook } from './gzipHook.js';
 import { applyTranslateMessageUpdatedOptimization, patchAutoCompletePositioning, patchPowerUserResizeHandler, restoreAutoCompletePositioning, restorePowerUserResizeHandler } from './miscPatches.js';
-import { startPerformanceTrace, stopPerformanceTraceAndExport, updatePerformanceTraceControls } from './perfTrace.js';
+import { startPerformanceTrace, stopPerformanceTraceAndExport, syncPerformanceTraceFetchHook, updatePerformanceTraceControls } from './perfTrace.js';
 import { applyRegexQuickOperationOptimization } from './regexQuickOps.js';
 import { isChatLossMitigationSupported } from './reloadGuard.js';
 import { MODULE_NAME, extensionState, saveExtensionSettings, settings } from './state.js';
@@ -328,20 +329,8 @@ async function renderSettingsPanel() {
         });
 
     $('#bai_bai_toolkit_chat_keyboard_scan_reduction_enabled')
-        .prop('checked', settings.chatKeyboardScanReductionEnabled !== false)
-        .on('input', async function () {
-            const checkbox = $(this);
-            checkbox.prop('disabled', true);
-            try {
-                await setBaibaokuChatKeyboardScanReductionEnabled(Boolean(checkbox.prop('checked')));
-            } catch (error) {
-                console.debug(`${LOG_PREFIX} Failed to save BaiBaoKu chat keyboard scan reduction config`, error);
-                checkbox.prop('checked', settings.chatKeyboardScanReductionEnabled !== false);
-            } finally {
-                checkbox.prop('disabled', false);
-                applyBaibaokuPanelLocalState(container);
-            }
-        });
+        .prop('checked', false)
+        .prop('disabled', true);
 
     $('#bai_bai_toolkit_character_list_avatar_lazy_load_enabled')
         .prop('checked', settings.characterListAvatarLazyLoadEnabled)
@@ -360,6 +349,7 @@ async function renderSettingsPanel() {
         .prop('checked', settings.saveRequestGzipEnabled)
         .on('input', function () {
             settings.saveRequestGzipEnabled = Boolean($(this).prop('checked'));
+            syncSaveRequestGzipFetchHook();
             saveExtensionSettings();
         });
 
@@ -411,7 +401,12 @@ function applyFeatureSettings() {
         restorePowerUserResizeHandler();
     }
 
+    chatOptimizations.applyFastChatListFetchOptimization();
     chatOptimizations.applyFastChatListScrollOptimization();
+    chatOptimizations.observeChatManagementPopupCleanup();
+    syncSaveRequestGzipFetchHook();
+    syncPerformanceTraceFetchHook();
+    syncGenerateRetryFetchHook();
     worldInfoPageOptimization.applyWorldInfoDrawerOptimization();
     worldInfoPageOptimization.applyWorldInfoLazySelect2Optimization();
     worldInfoPageOptimization.applyWorldInfoCharacterFilterOptionsOptimization();

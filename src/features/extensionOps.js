@@ -166,13 +166,14 @@ function installExtensionOpsFetchHook() {
         return existing;
     }
 
-    const originalFetch = globalThis.fetch;
-    if (typeof originalFetch !== 'function') {
+    const rawOriginalFetch = globalThis.fetch;
+    if (typeof rawOriginalFetch !== 'function') {
         return null;
     }
 
     const hook = {
-        originalFetch: originalFetch.bind(globalThis),
+        rawOriginalFetch,
+        originalFetch: rawOriginalFetch.bind(globalThis),
         wrappedFetch: null,
     };
 
@@ -216,6 +217,9 @@ function installExtensionOpsFetchHook() {
         return response;
     };
 
+    hook.wrappedFetch[EXTENSION_OPS_FETCH_KEY] = true;
+    hook.wrappedFetch.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
+    hook.wrappedFetch.__baiBaiToolkitHookState = hook;
     globalThis[EXTENSION_OPS_FETCH_KEY] = hook;
     globalThis.fetch = hook.wrappedFetch;
 

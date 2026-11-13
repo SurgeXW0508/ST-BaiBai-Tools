@@ -88,13 +88,57 @@ describe('story history serialization', () => {
     ];
 
     const indices = selectHistoryIndices(chat, 4, 2);
-    const history = serializeRewriteHistory(chat, indices, 'User', 'Char');
+    const history = serializeRewriteHistory(chat, indices, 'User', 'Char', 4);
 
     expect(history.historyReference).toContain('[楼层 #0｜Char]\nAI 一');
     expect(history.historyReference).toContain('[楼层 #1｜User]\n用户一');
     expect(history.historyReference).toContain('[楼层 #2｜Char]\nAI 二');
     expect(history.latestUserMessage).toBe('用户二');
     expect(history.messageCount).toBe(4);
+  });
+
+  it('retains opening greeting [#0 Greeting, #1 User] and preceding AI turn when rewriting a User floor without mislabeling latestUserMessage', () => {
+    const greetingChat = [
+      message('欢迎来到冒险公会！'),
+      message('我想接取委托', { name: 'User', is_user: true }),
+    ];
+    const greetingIndices = selectHistoryIndices(greetingChat, 1, 1);
+    expect(greetingIndices).toEqual([0]);
+    expect(serializeRewriteHistory(greetingChat, greetingIndices, 'User', 'Char', 1)).toEqual({
+      historyReference: '[楼层 #0｜Char]\n欢迎来到冒险公会！',
+      latestUserMessage: '',
+      messageCount: 1,
+    });
+
+    const fourFloorChat = [
+      message('AI1'),
+      message('User1', { name: 'User', is_user: true }),
+      message('AI2'),
+      message('User2', { name: 'User', is_user: true }),
+    ];
+    const userFloorIndices = selectHistoryIndices(fourFloorChat, 3, 1);
+    expect(userFloorIndices).toEqual([1, 2]);
+    const serialized = serializeRewriteHistory(fourFloorChat, userFloorIndices, 'User', 'Char', 3);
+    expect(serialized.historyReference).toContain('[楼层 #1｜User]\nUser1');
+    expect(serialized.historyReference).toContain('[楼层 #2｜Char]\nAI2');
+    expect(serialized.latestUserMessage).toBe('');
+    expect(serialized.messageCount).toBe(2);
+  });
+
+  it('guards undefined message.name and collects contiguous multi-AI group turns cleanly', () => {
+    const groupChat: STMessage[] = [
+      message('大家怎么看？', { name: 'User', is_user: true }),
+      { name: undefined as unknown as string, is_user: false, is_system: false, mes: '无名路人插话' },
+      message('我也同意', { name: 'Bob', is_user: false }),
+      message('待改写回复', { name: 'Alice', is_user: false }),
+    ];
+
+    const indices = selectHistoryIndices(groupChat, 3, 1);
+    expect(indices).toEqual([0, 1, 2]);
+    const history = serializeRewriteHistory(groupChat, indices, 'User', 'Char', 3);
+    expect(history.historyReference).toContain('[楼层 #1｜Char]\n无名路人插话');
+    expect(history.historyReference).toContain('[楼层 #2｜Bob]\n我也同意');
+    expect(history.latestUserMessage).toBe('');
   });
 });
 
@@ -191,12 +235,13 @@ describe('optional story context', () => {
     ]);
     expect(capturedScanChats[1]).toEqual([
       '主角: 正在改写的第二轮用户提问',
+      'Char: 第二轮 AI 回复',
       '主角: 第一轮用户提问',
       'Char: 第一轮 AI 回复',
     ]);
   });
 
-  it('snapshots and restores extensionPrompts["2_floating_prompt"] mutated during dry-run WI scan', async () => {
+  it('snapshots and restores extensionPrompts["2_floating_prompt"] and skips restore on mid-scan chat switch', async () => {
     const filterFn = () => true;
     const extensionPrompts: STContext['extensionPrompts'] = {
       '2_floating_prompt': {
@@ -208,6 +253,7 @@ describe('optional story context', () => {
     };
     contextMocks.getContext.mockReturnValue({
       ...context,
+      getCurrentChatId: () => 'chat-1',
       extensionPrompts,
     });
     contextMocks.getCheckWorldInfo.mockResolvedValue(async () => {
@@ -228,19 +274,42 @@ describe('optional story context', () => {
       filter: filterFn,
     });
 
-    // 初始不存在 2_floating_prompt 时，干跑新增的槽位也应被彻底移除
+    // 初始不存在 2_floating_prompt 时，干跑前挂空占位、结束后彻底移除
     const emptyPrompts: STContext['extensionPrompts'] = {};
+    let sawTempPlaceholder = false;
     contextMocks.getContext.mockReturnValue({
       ...context,
+      getCurrentChatId: () => 'chat-1',
       extensionPrompts: emptyPrompts,
     });
     contextMocks.getCheckWorldInfo.mockResolvedValue(async () => {
+      sawTempPlaceholder = '2_floating_prompt' in emptyPrompts;
       emptyPrompts['2_floating_prompt'] = { value: '干跑残留' };
       return { allActivatedEntries: new Set() };
     });
 
     await collectRewriteStoryContext(0, 'current floor', 0);
+    expect(sawTempPlaceholder).toBe(true);
     expect('2_floating_prompt' in emptyPrompts).toBe(false);
+
+    // 干跑中途切卡后，绝不把旧卡快照回写覆盖新卡的 extensionPrompts
+    const sharedPrompts: STContext['extensionPrompts'] = {
+      '2_floating_prompt': { value: 'A卡注释', position: 1, depth: 4 },
+    };
+    let activeChatId = 'chat-a';
+    contextMocks.getContext.mockImplementation(() => ({
+      ...context,
+      getCurrentChatId: () => activeChatId,
+      extensionPrompts: sharedPrompts,
+    }));
+    contextMocks.getCheckWorldInfo.mockResolvedValue(async () => {
+      activeChatId = 'chat-b';
+      sharedPrompts['2_floating_prompt'] = { value: 'B卡自己的新注释', position: 1, depth: 4 };
+      return { allActivatedEntries: new Set() };
+    });
+
+    await collectRewriteStoryContext(0, 'current floor', 0);
+    expect(sharedPrompts['2_floating_prompt']?.value).toBe('B卡自己的新注释');
   });
 
   it('prioritizes baibai_exclude_settings over legacy baibai_book exclude lists', async () => {

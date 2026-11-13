@@ -1,12 +1,20 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { deleteFloorsFrom, toggleFloorHidden } from '@pen/st/floorActions';
+import {
+  deleteFloorsFrom,
+  resolveEffectiveDeleteStartFloor,
+  toggleFloorHidden,
+} from '@pen/st/floorActions';
 
 function installContext(context: Record<string, unknown>): void {
   vi.stubGlobal('window', {
     SillyTavern: {
       getContext: () => context,
     },
+  });
+  vi.stubGlobal('document', {
+    querySelector: vi.fn(() => null),
+    querySelectorAll: vi.fn(() => []),
   });
 }
 
@@ -15,10 +23,14 @@ afterEach(() => {
 });
 
 describe('toggleFloorHidden', () => {
-  it('hides a visible floor via /hide', async () => {
-    const run = vi.fn(async () => undefined);
+  it('hides a visible floor via /hide and verifies post-condition', async () => {
+    const chat = [{ name: '角色', is_user: false, is_system: false, mes: '正文' }];
+    const run = vi.fn(async () => {
+      chat[0]!.is_system = true;
+      return undefined;
+    });
     installContext({
-      chat: [{ name: '角色', is_user: false, is_system: false, mes: '正文' }],
+      chat,
       executeSlashCommandsWithOptions: run,
     });
 
@@ -30,9 +42,13 @@ describe('toggleFloorHidden', () => {
   });
 
   it('unhides a hidden floor via /unhide', async () => {
-    const run = vi.fn(async () => undefined);
+    const chat = [{ name: '角色', is_user: false, is_system: true, mes: '正文' }];
+    const run = vi.fn(async () => {
+      chat[0]!.is_system = false;
+      return undefined;
+    });
     installContext({
-      chat: [{ name: '角色', is_user: false, is_system: true, mes: '正文' }],
+      chat,
       executeSlashCommandsWithOptions: run,
     });
 
@@ -40,7 +56,51 @@ describe('toggleFloorHidden', () => {
     expect(run).toHaveBeenCalledWith('/unhide 0', expect.anything());
   });
 
-  it('throws when the slash command reports an error', async () => {
+  it('blocks /hide when #curEditTextarea has unsaved edits, and cancels clean #curEditTextarea automatically', async () => {
+    const chat = [{ name: '角色', is_user: false, is_system: false, mes: '  原始正文  ' }];
+    const run = vi.fn(async () => {
+      chat[0]!.is_system = true;
+      return undefined;
+    });
+    let editorValue = '用户改了一半尚未保存';
+    let editorOpen = true;
+    const cancelBtn = {
+      click: vi.fn(() => {
+        editorOpen = false;
+      }),
+    };
+    const mesNode = {
+      getAttribute: (name: string) => (name === 'mesid' ? '0' : null),
+      querySelector: (sel: string) => {
+        if (sel === '#curEditTextarea') return editorOpen ? { value: editorValue } : null;
+        if (sel === '.mes_edit_cancel') return cancelBtn;
+        return null;
+      },
+    };
+    vi.stubGlobal('window', {
+      SillyTavern: {
+        getContext: () => ({
+          chat,
+          executeSlashCommandsWithOptions: run,
+        }),
+      },
+    });
+    vi.stubGlobal('document', {
+      querySelector: vi.fn(() => mesNode),
+      querySelectorAll: vi.fn(() => (editorOpen ? [mesNode] : [])),
+    });
+
+    await expect(toggleFloorHidden(0)).rejects.toThrow('正在酒馆原生编辑框中修改且未保存');
+    expect(run).not.toHaveBeenCalled();
+
+    // 当原生编辑框文本仅与 mes.trim() 一致（未改动）时，应自动取消编辑框后继续隐藏
+    editorValue = '原始正文';
+    await expect(toggleFloorHidden(0)).resolves.toBe(true);
+    expect(cancelBtn.click).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it('throws when the slash command reports an error or leaves post-condition unmet', async () => {
     installContext({
       chat: [{ name: '角色', is_user: false, is_system: false, mes: '正文' }],
       executeSlashCommandsWithOptions: vi.fn(async () => ({
@@ -50,6 +110,13 @@ describe('toggleFloorHidden', () => {
     });
 
     await expect(toggleFloorHidden(0)).rejects.toThrow('命令失败');
+
+    // 无报错但未实际切换 is_system 时抛后置校验异常
+    installContext({
+      chat: [{ name: '角色', is_user: false, is_system: false, mes: '正文' }],
+      executeSlashCommandsWithOptions: vi.fn(async () => undefined),
+    });
+    await expect(toggleFloorHidden(0)).rejects.toThrow('状态未生效');
   });
 
   it('throws when the floor does not exist', async () => {
@@ -59,14 +126,17 @@ describe('toggleFloorHidden', () => {
 });
 
 describe('deleteFloorsFrom', () => {
-  it('deletes the floor and everything after it via /del', async () => {
-    const run = vi.fn(async () => undefined);
+  it('deletes the floor and everything after it via /del toolcalls=false', async () => {
     const chat = Array.from({ length: 5 }, () => ({
       name: '角色',
       is_user: false,
       is_system: false,
       mes: '正文',
     }));
+    const run = vi.fn(async () => {
+      chat.splice(2);
+      return undefined;
+    });
     installContext({
       chat,
       executeSlashCommandsWithOptions: run,
@@ -74,11 +144,59 @@ describe('deleteFloorsFrom', () => {
       POPUP_TYPE: { CONFIRM: 'confirm' },
     });
 
-    await expect(deleteFloorsFrom(2)).resolves.toBe(3);
-    expect(run).toHaveBeenCalledWith('/del 3', {
+    await expect(deleteFloorsFrom(2)).resolves.toEqual({
+      deletedCount: 3,
+      effectiveStartFloor: 2,
+    });
+    expect(run).toHaveBeenCalledWith('/del toolcalls=false 3', {
       handleExecutionErrors: true,
       source: 'baibai-pen',
     });
+  });
+
+  it('includes preceding tool_invocations system carrier floors in effectiveStartFloor and prompt', async () => {
+    const prompts: string[] = [];
+    const chat = [
+      { name: 'User', is_user: true, is_system: false, mes: '帮我查天气' },
+      {
+        name: 'System',
+        is_user: false,
+        is_system: true,
+        mes: '',
+        extra: { tool_invocations: [{ id: 'call_1' }] },
+      },
+      {
+        name: 'System',
+        is_user: false,
+        is_system: true,
+        mes: '',
+        extra: { tool_invocations: [{ id: 'call_2' }] },
+      },
+      { name: 'Char', is_user: false, is_system: false, mes: '今天晴天' },
+    ];
+    expect(resolveEffectiveDeleteStartFloor(chat, 3)).toBe(1);
+
+    const run = vi.fn(async () => {
+      chat.splice(1);
+      return undefined;
+    });
+    installContext({
+      chat,
+      executeSlashCommandsWithOptions: run,
+      POPUP_TYPE: { CONFIRM: 'confirm' },
+      callGenericPopup: vi.fn(async (msg: string) => {
+        prompts.push(msg);
+        return true;
+      }),
+    });
+
+    await expect(deleteFloorsFrom(3)).resolves.toEqual({
+      deletedCount: 3,
+      effectiveStartFloor: 1,
+    });
+    expect(prompts[0]).toContain('关联工具调用记录');
+    expect(prompts[0]).toContain('第 1 至 #3 层（共 3 条）');
+    expect(run).toHaveBeenCalledWith('/del toolcalls=false 3', expect.anything());
   });
 
   it('does nothing when the user cancels the confirm popup', async () => {
@@ -90,7 +208,10 @@ describe('deleteFloorsFrom', () => {
       POPUP_TYPE: { CONFIRM: 'confirm' },
     });
 
-    await expect(deleteFloorsFrom(0)).resolves.toBe(0);
+    await expect(deleteFloorsFrom(0)).resolves.toEqual({
+      deletedCount: 0,
+      effectiveStartFloor: 0,
+    });
     expect(run).not.toHaveBeenCalled();
   });
 
@@ -137,6 +258,10 @@ describe('deleteFloorsFrom', () => {
         getContext: () => activeContext,
       },
     });
+    vi.stubGlobal('document', {
+      querySelector: vi.fn(() => null),
+      querySelectorAll: vi.fn(() => []),
+    });
 
     await expect(deleteFloorsFrom(1)).rejects.toThrow('确认期间当前聊天已切换');
     expect(runA).not.toHaveBeenCalled();
@@ -144,13 +269,16 @@ describe('deleteFloorsFrom', () => {
   });
 
   it('re-confirms with updated count when new floors arrive in the same chat during popup', async () => {
-    const run = vi.fn(async () => undefined);
     const prompts: string[] = [];
     const chat = [
       { name: '角色', is_user: false, is_system: false, mes: 'F0' },
       { name: '角色', is_user: false, is_system: false, mes: 'F1' },
       { name: '角色', is_user: false, is_system: false, mes: 'F2' },
     ];
+    const run = vi.fn(async () => {
+      chat.splice(1);
+      return undefined;
+    });
 
     installContext({
       chat,
@@ -167,29 +295,35 @@ describe('deleteFloorsFrom', () => {
       }),
     });
 
-    await expect(deleteFloorsFrom(1)).resolves.toBe(3);
+    await expect(deleteFloorsFrom(1)).resolves.toEqual({
+      deletedCount: 3,
+      effectiveStartFloor: 1,
+    });
     expect(prompts).toHaveLength(2);
     expect(prompts[0]).toContain('第 1 至 #2 层（共 2 条）');
     expect(prompts[1]).toContain('第 1 至 #3 层（共 3 条）');
     expect(run).toHaveBeenCalledOnce();
-    expect(run).toHaveBeenCalledWith('/del 3', {
+    expect(run).toHaveBeenCalledWith('/del toolcalls=false 3', {
       handleExecutionErrors: true,
       source: 'baibai-pen',
     });
   });
 
-  it('surfaces HTTP 500 persistence failure if /del triggers a failing chat save', async () => {
+  it('surfaces HTTP 500 persistence failure and invokes reloadCurrentChat to resync RAM/DOM with disk', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => new Response('Server Error', { status: 500 })),
     );
+    const reloadCurrentChat = vi.fn(async () => undefined);
     const chat = [{ name: '角色', is_user: false, is_system: false, mes: '正文' }];
     installContext({
       chat,
       getCurrentChatId: () => 'chat-a',
+      reloadCurrentChat,
       POPUP_TYPE: { CONFIRM: 'confirm' },
       callGenericPopup: vi.fn(async () => true),
       executeSlashCommandsWithOptions: vi.fn(async () => {
+        chat.splice(0);
         await fetch('/api/chats/save', {
           method: 'POST',
           body: JSON.stringify({ file_name: 'chat-a', chat: [] }),
@@ -199,5 +333,6 @@ describe('deleteFloorsFrom', () => {
     });
 
     await expect(deleteFloorsFrom(0)).rejects.toThrow('HTTP 500');
+    expect(reloadCurrentChat).toHaveBeenCalledOnce();
   });
 });

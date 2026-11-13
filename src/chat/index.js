@@ -1,5 +1,5 @@
 // 聊天优化功能的公共出口(由原 chatOptimizations.js 拆分而来)
-export { applyFastChatListScrollOptimization, observeChatManagementPopupCleanup, patchFastChatBackupsFetch, patchFastChatSearchFetch } from './chatList.js';
+export { applyFastChatListFetchOptimization, applyFastChatListScrollOptimization, observeChatManagementPopupCleanup, patchFastChatBackupsFetch, patchFastChatSearchFetch, unpatchFastChatBackupsFetch, unpatchFastChatSearchFetch } from './chatList.js';
 export { applyMessageCompletionScrollToMiddle } from './completionScroll.js';
 export { applyMessageCompletionSound } from './completionSound.js';
 export { applyChatDeleteEditFlowOptimization, isChatDeleteEditFlowSupported, isWelcomeRecentChatDirectOpenCompatibilityMode } from './deleteEditFlow.js';

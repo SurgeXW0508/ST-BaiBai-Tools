@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  normalizeSideChannelBaseUrl,
+  requireValidSideChannelBaseUrl,
+} from '@pen/api/channelParams';
 import type { ApiChannel } from '@pen/api/sharedChannels';
 import {
+  ApiError,
   buildRequestBody,
   fetchModels,
   requestCompletion,
@@ -141,7 +146,7 @@ describe('buildRequestBody：思考强度与两条源分支', () => {
     expect(body.custom_include_body).toBeUndefined();
   });
 
-  it('拒绝空地址与非 http(s) 地址，阻断回退使用酒馆主 OpenAI 密钥', async () => {
+  it('拒绝空地址、非 http(s)、内嵌凭据、查询串与锚点，并规范化后缀', async () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
     vi.stubGlobal('window', {
@@ -154,7 +159,16 @@ describe('buildRequestBody：思考强度与两条源分支', () => {
       clearTimeout,
     });
 
-    for (const badUrl of ['', '   ', '/v1', 'ftp://api.example.com', 'javascript:alert(1)']) {
+    for (const badUrl of [
+      '',
+      '   ',
+      '/v1',
+      'ftp://api.example.com',
+      'javascript:alert(1)',
+      'https://user:pass@api.example.com/v1',
+      'https://api.example.com/v1?api_key=leak',
+      'https://api.example.com/v1#frag',
+    ]) {
       expect(() => buildRequestBody({ ...channel, url: badUrl }, msgs, badUrl)).toThrow();
       await expect(requestCompletion({ ...channel, url: badUrl }, msgs)).rejects.toThrow();
       await expect(fetchModels({ url: badUrl, key: 'k', timeoutSec: 10 })).rejects.toThrow();
@@ -162,5 +176,114 @@ describe('buildRequestBody：思考强度与两条源分支', () => {
       expect(testRes.ok).toBe(false);
     }
     expect(fetchSpy).not.toHaveBeenCalled();
+
+    expect(requireValidSideChannelBaseUrl('https://api.example.com/v1/chat/completions/')).toBe(
+      'https://api.example.com/v1',
+    );
+    expect(requireValidSideChannelBaseUrl('https://api.example.com/openai/models')).toBe(
+      'https://api.example.com/openai',
+    );
+    expect(normalizeSideChannelBaseUrl('https://api.example.com/chat/completions')).toBe(
+      'https://api.example.com',
+    );
+    expect(normalizeSideChannelBaseUrl('https://api.example.com')).toBe(
+      'https://api.example.com/v1',
+    );
+  });
+});
+
+describe('P-1：HTTP 200 错误信封与 SSE 尾部刷新/JSON 回退', () => {
+  const msgs = [{ role: 'user' as const, content: '测试' }];
+
+  function stubStWindow(): void {
+    vi.stubGlobal('window', {
+      SillyTavern: {
+        getContext: () => ({
+          getRequestHeaders: () => ({ 'X-CSRF-Token': 't' }),
+        }),
+      },
+      setTimeout,
+      clearTimeout,
+    });
+  }
+
+  it('非流式 HTTP 200 { error } 抛出真实错误，且 404 错误在 testChannel 下自动回退切换 /v1', async () => {
+    stubStWindow();
+    const seenProxies: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? '{}'));
+        seenProxies.push(body.reverse_proxy);
+        if (body.reverse_proxy === 'https://api.example.com/gw') {
+          return new Response(
+            JSON.stringify({ error: { message: '404 page not found' }, quota_error: false }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response(
+          JSON.stringify({ choices: [{ message: { content: 'pong' } }] }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }),
+    );
+
+    await expect(
+      requestCompletion({ ...channel, url: 'https://api.example.com/gw', stream: false }, msgs),
+    ).rejects.toMatchObject({
+      name: 'ApiError',
+      status: 404,
+      message: expect.stringContaining('404 page not found'),
+    });
+
+    seenProxies.length = 0;
+    const res = await testChannel({
+      ...channel,
+      url: 'https://api.example.com/gw',
+      stream: false,
+    });
+    expect(res.ok).toBe(true);
+    expect(res.message).toContain('连通正常，已改用：https://api.example.com/gw/v1');
+    expect(seenProxies).toEqual(['https://api.example.com/gw', 'https://api.example.com/gw/v1']);
+  });
+
+  it('流式模式 EOF 无尾随换行仍能完整提取增量文本，遇纯 JSON 错误/结果自动回退解析', async () => {
+    stubStWindow();
+    const encoder = new TextEncoder();
+
+    // 1. 最后一帧 SSE 没有换行符
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        const stream = new ReadableStream<Uint8Array>({
+          start(ctrl) {
+            ctrl.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"前半"}}]}\n\n'));
+            ctrl.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"后半"}}]}'));
+            ctrl.close();
+          },
+        });
+        return new Response(stream, { status: 200 });
+      }),
+    );
+
+    await expect(
+      requestCompletion({ ...channel, stream: true }, msgs),
+    ).resolves.toBe('前半后半');
+
+    // 2. stream: true 但上游直接返回 HTTP 200 JSON { error }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: { message: '额度已耗尽' } }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+      ),
+    );
+
+    await expect(requestCompletion({ ...channel, stream: true }, msgs)).rejects.toThrow(
+      new ApiError('副 API 返回错误：额度已耗尽'),
+    );
   });
 });

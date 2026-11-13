@@ -230,4 +230,57 @@ describe('sharedChannels consumer-mode hydration and migration', () => {
     expect(fakeWindow.listeners.get('st-baibai-api-channels:changed')?.size).toBe(1);
     expect(channels.map(item => item.id)).toEqual(['ch_external']);
   });
+
+  it('maintains monotonic revision against external store bumps and clears waitTimer on teardown', async () => {
+    const extensionSettings: Record<string, unknown> = {
+      baibai_api_channels: {
+        schemaVersion: 1,
+        revision: 2,
+        channels: [],
+      },
+    };
+    const fakeWindow = createFakeWindow();
+    installHost(extensionSettings, fakeWindow);
+
+    await initializeSharedChannels();
+
+    // 模拟另一插件直接把底层存储 revision 升到了 10 但尚未派发事件
+    extensionSettings.baibai_api_channels = {
+      schemaVersion: 1,
+      revision: 10,
+      channels: [],
+    };
+
+    saveSharedChannel({
+      id: 'ch_mono',
+      name: '单调递增测试',
+      url: 'https://api.example.com/v1',
+      key: 'k',
+      model: 'm',
+      temperature: 1,
+      maxTokens: 1024,
+      timeoutSec: 30,
+      stream: false,
+      prefill: true,
+      excludeParams: [],
+      reasoningEffort: '',
+    });
+
+    expect((extensionSettings.baibai_api_channels as { revision: number }).revision).toBe(11);
+
+    // 验证等待 extensionSettings 期间调用 teardownSharedChannels 立即清理定时器
+    resetSharedChannelsStateForTests();
+    const clearSpy = vi.fn(clearTimeout);
+    vi.stubGlobal('window', {
+      ...createFakeWindow(),
+      clearTimeout: clearSpy,
+    });
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({}),
+    });
+    const waitInit = initializeSharedChannels();
+    teardownSharedChannels();
+    await waitInit;
+    expect(clearSpy).toHaveBeenCalled();
+  });
 });

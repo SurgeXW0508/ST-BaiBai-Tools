@@ -5,8 +5,6 @@ const CURRENT_VERSION = __BBT_VERSION__;
 const LOG_PREFIX = '[柏宝箱]';
 const SETTINGS_KEY = 'baiBaiToolkit';
 const EXTENSION_KEY = '__baiBaiToolkitExtensionInstalled';
-const FAST_SETTINGS_BOOTSTRAP_FETCH_KEY = '__baiBaiToolkitFastSettingsBootstrapFetchPatched';
-const FAST_CHARACTER_LIST_FETCH_KEY = '__baiBaiToolkitFastCharacterListFetchPatched';
 const BAIBAOKU_EARLY_BRIDGE_KEY = '__baibaokuEarlyBridge';
 const LAZY_THEME_CHANGE_GUARD_KEY = '__baiBaiToolkitLazyThemeChangeGuard';
 const RELOAD_GREETING_GUARD_KEY = '__baiBaiToolkitReloadGuard';
@@ -255,7 +253,6 @@ const SAVE_REQUEST_GZIP_PATHS = new Set([
     '/api/chats/save',
     '/api/chats/group/save',
 ]);
-const FAST_SETTINGS_BOOTSTRAP_CACHE_MS = 15_000;
 const PERFORMANCE_TRACE_FETCH_PATHS = new Set([
     '/api/chats/get',
     '/api/chats/group/get',
@@ -394,9 +391,6 @@ export {
     EXTENSION_UPDATE_PATH,
     EXTENSION_VERSION_CHECK_TIMEOUT_MS,
     EXTENSION_VERSION_PATH,
-    FAST_CHARACTER_LIST_FETCH_KEY,
-    FAST_SETTINGS_BOOTSTRAP_CACHE_MS,
-    FAST_SETTINGS_BOOTSTRAP_FETCH_KEY,
     GENERATE_BLACKLIST_SETTLED_EVENT,
     GENERATE_RETRY_BASE_DELAY_MS,
     GENERATE_RETRY_DEFAULT_RETRIES,

@@ -1,6 +1,7 @@
 import { saveSettingsDebounced } from '@sillytavern/script';
 import { extension_settings } from '@sillytavern/scripts/extensions';
 import { EXTENSION_KEY, SETTINGS_KEY } from './constants.js';
+const BAIBAOKU_EARLY_BRIDGE_KEY = '__baibaokuEarlyBridge';
 const MODULE_NAME = getModuleName();
 const EXTENSION_ID = getExtensionId();
 const defaultSettings = {
@@ -21,7 +22,7 @@ const defaultSettings = {
     progressiveChatLoadingEnabled: false,
     saveGenerateEnabled: false,
     tokenizerBulkCountEnabled: true,
-    chatKeyboardScanReductionEnabled: true,
+    chatKeyboardScanReductionEnabled: false,
     extensionManifestBundleEnabled: true,
     presetAutoBackupEnabled: true,
     presetBackupAutoCleanupEnabled: true,
@@ -76,6 +77,16 @@ const linkedPresetOptimizationSettingKeys = [
     'presetMobileWholeRowDragEnabled',
     'presetToggleOptimizationEnabled',
 ];
+const baibaokuOwnedSettingKeys = new Set([
+    'baibaokuSettingsAccelerationEnabled',
+    'baibaokuLazyThemeLoadingEnabled',
+    'fastCharacterListEnabled',
+    'recentChatListAccelerationEnabled',
+    'progressiveChatLoadingEnabled',
+    'extensionManifestBundleEnabled',
+    'tokenizerBulkCountEnabled',
+    'chatKeyboardScanReductionEnabled',
+]);
 const legacySettingsKeys = [
     'generateBlacklistRetryMaxRetries',
     'textareaScrollOptimizationEnabled',
@@ -86,6 +97,8 @@ const legacySettingsKeys = [
     'mobileChatEntryKeyboardSuppressionEnabled',
     'fastSettingsBootstrapEnabled',
     'fastCharacterListEnabled',
+    'tokenizerBulkCountEnabled',
+    'chatKeyboardScanReductionEnabled',
 ];
 const settings = { ...defaultSettings };
 const extensionState = getExtensionState();
@@ -117,23 +130,112 @@ function getExtensionId() {
     return MODULE_NAME.split('/').pop() || MODULE_NAME;
 }
 
+function readBridgeFlag(bridge, methodName, propName) {
+    if (!bridge || typeof bridge !== 'object') {
+        return null;
+    }
+    if (typeof bridge[methodName] === 'function') {
+        try {
+            const value = bridge[methodName]();
+            if (typeof value === 'boolean') {
+                return value;
+            }
+        } catch {
+            // Fall back to plain bridge properties if getter fails.
+        }
+    }
+    if (typeof bridge[propName] === 'boolean') {
+        return bridge[propName];
+    }
+    if (typeof bridge.config?.[propName] === 'boolean') {
+        return bridge.config[propName];
+    }
+    if (typeof bridge.fastConfig?.[propName] === 'boolean') {
+        return bridge.fastConfig[propName];
+    }
+    if (typeof bridge.initialFastConfig?.[propName] === 'boolean') {
+        return bridge.initialFastConfig[propName];
+    }
+    return null;
+}
+
+function hydrateSettingsFromBaibaokuEarlyBridge() {
+    settings.progressiveChatLoadingEnabled = false;
+    settings.saveGenerateEnabled = false;
+    settings.chatKeyboardScanReductionEnabled = false;
+
+    const bridge = globalThis[BAIBAOKU_EARLY_BRIDGE_KEY];
+    if (!bridge || typeof bridge !== 'object') {
+        return false;
+    }
+
+    let hydrated = false;
+    const settingsAccel = readBridgeFlag(bridge, 'isSettingsAccelerationEnabled', 'settingsAccelerationEnabled');
+    if (typeof settingsAccel === 'boolean') {
+        settings.baibaokuSettingsAccelerationEnabled = settingsAccel;
+        hydrated = true;
+    }
+
+    const lazyTheme = readBridgeFlag(bridge, 'isLazyThemeLoadingEnabled', 'lazyThemeLoadingEnabled');
+    if (typeof lazyTheme === 'boolean') {
+        settings.baibaokuLazyThemeLoadingEnabled = settings.baibaokuSettingsAccelerationEnabled !== false && lazyTheme;
+        hydrated = true;
+    } else if (settings.baibaokuSettingsAccelerationEnabled === false) {
+        settings.baibaokuLazyThemeLoadingEnabled = false;
+    }
+
+    const manifestBundle = readBridgeFlag(bridge, 'isExtensionManifestBundleEnabled', 'extensionManifestBundleEnabled');
+    if (typeof manifestBundle === 'boolean') {
+        settings.extensionManifestBundleEnabled = manifestBundle;
+        hydrated = true;
+    }
+
+    const characterList = readBridgeFlag(bridge, 'isCharacterListAccelerationEnabled', 'characterListAccelerationEnabled');
+    if (typeof characterList === 'boolean') {
+        settings.fastCharacterListEnabled = characterList;
+        hydrated = true;
+    }
+
+    const recentChatList = readBridgeFlag(bridge, 'isRecentChatListAccelerationEnabled', 'recentChatListAccelerationEnabled');
+    if (typeof recentChatList === 'boolean') {
+        settings.recentChatListAccelerationEnabled = recentChatList;
+        hydrated = true;
+    }
+
+    const tokenizerBulk = readBridgeFlag(bridge, 'isTokenizerBulkCountEnabled', 'tokenizerBulkCountEnabled');
+    if (typeof tokenizerBulk === 'boolean') {
+        settings.tokenizerBulkCountEnabled = tokenizerBulk;
+        hydrated = true;
+    }
+
+    return hydrated;
+}
+
 function initializeSettings() {
     if (!extension_settings[SETTINGS_KEY] || typeof extension_settings[SETTINGS_KEY] !== 'object') {
         extension_settings[SETTINGS_KEY] = {};
     }
 
     let removedLegacySetting = false;
+    let migratedSettingsAcceleration = undefined;
 
     if (
-        typeof extension_settings[SETTINGS_KEY].baibaokuSettingsAccelerationEnabled !== 'boolean'
-        && typeof extension_settings[SETTINGS_KEY].fastSettingsBootstrapEnabled === 'boolean'
+        typeof extension_settings[SETTINGS_KEY].baibaokuSettingsAccelerationEnabled === 'boolean'
     ) {
-        extension_settings[SETTINGS_KEY].baibaokuSettingsAccelerationEnabled = extension_settings[SETTINGS_KEY].fastSettingsBootstrapEnabled;
+        migratedSettingsAcceleration = extension_settings[SETTINGS_KEY].baibaokuSettingsAccelerationEnabled;
+        delete extension_settings[SETTINGS_KEY].baibaokuSettingsAccelerationEnabled;
+        removedLegacySetting = true;
+    } else if (
+        typeof extension_settings[SETTINGS_KEY].fastSettingsBootstrapEnabled === 'boolean'
+    ) {
+        migratedSettingsAcceleration = extension_settings[SETTINGS_KEY].fastSettingsBootstrapEnabled;
     }
 
-    if (extension_settings[SETTINGS_KEY].progressiveChatLoadingEnabled === true) {
-        extension_settings[SETTINGS_KEY].progressiveChatLoadingEnabled = false;
-        removedLegacySetting = true;
+    for (const key of baibaokuOwnedSettingKeys) {
+        if (Object.prototype.hasOwnProperty.call(extension_settings[SETTINGS_KEY], key)) {
+            delete extension_settings[SETTINGS_KEY][key];
+            removedLegacySetting = true;
+        }
     }
 
     for (const key of legacySettingsKeys) {
@@ -150,12 +252,19 @@ function initializeSettings() {
     }
 
     for (const [key, value] of Object.entries(defaultSettings)) {
+        if (baibaokuOwnedSettingKeys.has(key)) {
+            continue;
+        }
         if (typeof extension_settings[SETTINGS_KEY][key] !== typeof value) {
             extension_settings[SETTINGS_KEY][key] = value;
         }
     }
 
     Object.assign(settings, defaultSettings, extension_settings[SETTINGS_KEY]);
+    if (typeof migratedSettingsAcceleration === 'boolean') {
+        settings.baibaokuSettingsAccelerationEnabled = migratedSettingsAcceleration;
+    }
+    hydrateSettingsFromBaibaokuEarlyBridge();
     const normalizedPresetLinkedOptimizationSettings = normalizeLinkedPresetOptimizationSettings();
     const normalizedMessageEditClickSetting = normalizeMessageEditClickSettings();
 
@@ -195,30 +304,26 @@ function normalizeLinkedPresetOptimizationSettings() {
 
 function saveExtensionSettings() {
     const persistedSettings = { ...settings };
-    delete persistedSettings.baibaokuSettingsAccelerationEnabled;
-    delete persistedSettings.baibaokuLazyThemeLoadingEnabled;
-    delete persistedSettings.fastCharacterListEnabled;
-    delete persistedSettings.recentChatListAccelerationEnabled;
-    delete persistedSettings.progressiveChatLoadingEnabled;
-    delete persistedSettings.extensionManifestBundleEnabled;
+    for (const key of baibaokuOwnedSettingKeys) {
+        delete persistedSettings[key];
+    }
     Object.assign(extension_settings[SETTINGS_KEY], persistedSettings);
-    delete extension_settings[SETTINGS_KEY].baibaokuSettingsAccelerationEnabled;
-    delete extension_settings[SETTINGS_KEY].baibaokuLazyThemeLoadingEnabled;
-    delete extension_settings[SETTINGS_KEY].fastCharacterListEnabled;
-    delete extension_settings[SETTINGS_KEY].recentChatListAccelerationEnabled;
-    delete extension_settings[SETTINGS_KEY].progressiveChatLoadingEnabled;
-    delete extension_settings[SETTINGS_KEY].extensionManifestBundleEnabled;
+    for (const key of baibaokuOwnedSettingKeys) {
+        delete extension_settings[SETTINGS_KEY][key];
+    }
     saveSettingsDebounced();
 }
 
 export {
     EXTENSION_ID,
     MODULE_NAME,
+    baibaokuOwnedSettingKeys,
     defaultSettings,
     extensionState,
     getExtensionId,
     getExtensionState,
     getModuleName,
+    hydrateSettingsFromBaibaokuEarlyBridge,
     initializeSettings,
     legacySettingsKeys,
     linkedPresetOptimizationSettingKeys,

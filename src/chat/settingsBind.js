@@ -1,6 +1,6 @@
 import { saveSettingsDebounced } from '@sillytavern/script';
 import { power_user } from '@sillytavern/scripts/power-user';
-import { applyFastChatListScrollOptimization } from './chatList.js';
+import { applyFastChatListFetchOptimization, applyFastChatListScrollOptimization, observeChatManagementPopupCleanup } from './chatList.js';
 import { applyMessageCompletionScrollToMiddle } from './completionScroll.js';
 import { initializeMessageCompletionSoundControls } from './completionSound.js';
 import { LONG_CHAT_DOM_RENDER_FORCE_DISABLED, REDUCE_LOADED_FLOORS_CHAT_PATHS, REDUCE_LOADED_FLOORS_FETCH_KEY, REDUCE_LOADED_FLOORS_INPUT_IDS, REDUCE_LOADED_FLOORS_LIMIT } from './constants.js';
@@ -25,6 +25,7 @@ function bindChatOptimizationSettings({ saveSettings } = {}) {
         .on('input', function () {
             settings.fastChatListEnabled = Boolean($(this).prop('checked'));
             persistSettings();
+            applyFastChatListFetchOptimization();
         });
 
     $('#bai_bai_toolkit_welcome_recent_chat_direct_open_enabled')
@@ -80,6 +81,7 @@ function bindChatOptimizationSettings({ saveSettings } = {}) {
             settings.chatListScrollOptimizationEnabled = Boolean($(this).prop('checked'));
             persistSettings();
             applyFastChatListScrollOptimization();
+            observeChatManagementPopupCleanup();
         });
 
     $('#bai_bai_toolkit_chat_list_auto_clear_enabled')
@@ -87,6 +89,7 @@ function bindChatOptimizationSettings({ saveSettings } = {}) {
         .on('input', function () {
             settings.chatListAutoClearEnabled = Boolean($(this).prop('checked'));
             persistSettings();
+            observeChatManagementPopupCleanup();
         });
 
     $('#bai_bai_toolkit_mobile_auto_keyboard_suppression_enabled')
