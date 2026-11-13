@@ -2,11 +2,15 @@ import {
   getCheckWorldInfo,
   getContext,
   getEjsTemplate,
+  type STExtensionPromptDescriptor,
   type STMessage,
   type WorldInfoEntry,
 } from '@pen/st/context';
 
 const HUGE_WORLD_INFO_CONTEXT = 1_000_000_000;
+const AUTHOR_NOTE_EXTENSION_KEY = '2_floating_prompt';
+const SHARED_EXCLUDES_KEY = 'baibai_exclude_settings';
+const BOOK_SETTINGS_KEY = 'baibai_book';
 const THINK_BLOCK =
   /<(?:think|thinking|thinging)\b[^>]*>[\s\S]*?<\/(?:think|thinking|thinging)\s*>/gi;
 const UNCLOSED_THINK_BLOCK = /<(?:think|thinking|thinging)\b[^>]*>[\s\S]*$/gi;
@@ -23,7 +27,6 @@ const NON_STORY_SYSTEM_TYPES = new Set([
   'welcome_prompt',
   'assistant_note',
 ]);
-const BOOK_SETTINGS_KEY = 'baibai_book';
 
 export interface RewriteStoryContext {
   historyReference: string;
@@ -172,25 +175,44 @@ interface BookWorldInfoSettings {
   renderWorldInfoTemplates: boolean;
 }
 
+function toStringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.filter((item): item is string => typeof item === 'string');
+}
+
 function bookWorldInfoSettings(): BookWorldInfoSettings {
-  const raw = getContext()?.extensionSettings?.[BOOK_SETTINGS_KEY];
-  const value = raw && typeof raw === 'object'
-    ? (raw as {
-      excludedWorldNames?: unknown;
-      excludedWorldInfoPatterns?: unknown;
-      renderWorldInfoTemplates?: unknown;
-    })
-    : {};
+  const extensionSettings = getContext()?.extensionSettings;
+  const rawSharedExcludes = extensionSettings?.[SHARED_EXCLUDES_KEY];
+  const sharedValue =
+    rawSharedExcludes && typeof rawSharedExcludes === 'object'
+      ? (rawSharedExcludes as {
+          excludedWorldNames?: unknown;
+          excludedWorldInfoPatterns?: unknown;
+        })
+      : null;
+
+  const rawBook = extensionSettings?.[BOOK_SETTINGS_KEY];
+  const bookValue =
+    rawBook && typeof rawBook === 'object'
+      ? (rawBook as {
+          excludedWorldNames?: unknown;
+          excludedWorldInfoPatterns?: unknown;
+          renderWorldInfoTemplates?: unknown;
+        })
+      : {};
+
   return {
-    excludedWorldNames: Array.isArray(value.excludedWorldNames)
-      ? value.excludedWorldNames.filter((item): item is string => typeof item === 'string')
-      : [],
-    excludedWorldInfoPatterns: Array.isArray(value.excludedWorldInfoPatterns)
-      ? value.excludedWorldInfoPatterns.filter((item): item is string => typeof item === 'string')
-      : [],
+    excludedWorldNames:
+      toStringArray(sharedValue?.excludedWorldNames) ??
+      toStringArray(bookValue.excludedWorldNames) ??
+      [],
+    excludedWorldInfoPatterns:
+      toStringArray(sharedValue?.excludedWorldInfoPatterns) ??
+      toStringArray(bookValue.excludedWorldInfoPatterns) ??
+      [],
     renderWorldInfoTemplates:
-      typeof value.renderWorldInfoTemplates === 'boolean'
-        ? value.renderWorldInfoTemplates
+      typeof bookValue.renderWorldInfoTemplates === 'boolean'
+        ? bookValue.renderWorldInfoTemplates
         : true,
   };
 }
@@ -239,10 +261,43 @@ async function renderWorldInfoContent(
   return text;
 }
 
+/**
+ * 酒馆 `checkWorldInfo(..., isDryRun=true)` 虽不持久化 sticky/cooldown，但命中 ANTop/ANBottom 条目时
+ * 仍会调用 `setExtensionPrompt('2_floating_prompt', ...)` 原地改写当前会话的作者注释提示词槽位。
+ * 在干跑前后快照并还原该槽位，避免多次改写预览污染后续正常聊天生成。
+ */
+async function withIsolatedAuthorNotePrompt<T>(task: () => Promise<T>): Promise<T> {
+  const prompts = getContext()?.extensionPrompts;
+  if (!prompts || typeof prompts !== 'object') {
+    return task();
+  }
+
+  const hadKey = Object.prototype.hasOwnProperty.call(prompts, AUTHOR_NOTE_EXTENSION_KEY);
+  const previous = prompts[AUTHOR_NOTE_EXTENSION_KEY];
+  const snapshot: STExtensionPromptDescriptor | undefined =
+    previous && typeof previous === 'object' ? { ...previous } : previous;
+
+  try {
+    return await task();
+  } finally {
+    const livePrompts = getContext()?.extensionPrompts ?? prompts;
+    if (livePrompts && typeof livePrompts === 'object') {
+      if (hadKey) {
+        livePrompts[AUTHOR_NOTE_EXTENSION_KEY] =
+          snapshot && typeof snapshot === 'object' ? { ...snapshot } : snapshot;
+      } else {
+        delete livePrompts[AUTHOR_NOTE_EXTENSION_KEY];
+      }
+    }
+  }
+}
+
 async function fetchWorldInfoViaPrompt(scanText: string[], floor: number): Promise<string> {
   const prompt = getContext()?.getWorldInfoPrompt;
   if (typeof prompt !== 'function') return '';
-  const result = await prompt(scanText, HUGE_WORLD_INFO_CONTEXT, true);
+  const result = await withIsolatedAuthorNotePrompt(() =>
+    prompt(scanText, HUGE_WORLD_INFO_CONTEXT, true),
+  );
   if (!result) return '';
   const chunks: string[] = [];
   if (typeof result.worldInfoBefore === 'string') chunks.push(result.worldInfoBefore);
@@ -262,7 +317,9 @@ async function fetchWorldInfo(scanText: string[], floor: number): Promise<string
   try {
     const checkWorldInfo = await getCheckWorldInfo();
     if (!checkWorldInfo) return await fetchWorldInfoViaPrompt(scanText, floor);
-    const result = await checkWorldInfo(scanText, HUGE_WORLD_INFO_CONTEXT, true);
+    const result = await withIsolatedAuthorNotePrompt(() =>
+      checkWorldInfo(scanText, HUGE_WORLD_INFO_CONTEXT, true),
+    );
     const activated = result?.allActivatedEntries;
     if (!activated) return '';
     const entries = activated instanceof Map ? [...activated.values()] : [...activated];
@@ -318,6 +375,11 @@ function fetchUserPersona(): string {
   return context.substituteParams('{{persona}}').trim();
 }
 
+/**
+ * 收集改写上下文。
+ * 注意：酒馆 `checkWorldInfo(chat, ...)` 约定 `chat[0]` 为最新消息（depth = 0），
+ * 因此 `scanText` 必须按「目标楼层 → 由近及远的历史楼层」逆序排列，并按真实说话人标注。
+ */
 export async function collectRewriteStoryContext(
   floor: number,
   currentText: string,
@@ -333,15 +395,25 @@ export async function collectRewriteStoryContext(
     context.name1 || 'User',
     context.name2 || 'Char',
   );
+
+  const targetMessage = context.chat[floor];
+  const targetSpeaker = targetMessage?.is_user
+    ? targetMessage.name || context.name1 || 'User'
+    : targetMessage?.name || context.name2 || 'Char';
+  const cleanedTarget = cleanStoryContextText(currentText);
+
   const scanText = [
-    ...indices.map(index => {
+    cleanedTarget ? `${targetSpeaker}: ${cleanedTarget}` : '',
+    ...[...indices].reverse().map(index => {
       const message = context.chat[index];
-      const name = message?.is_user
-        ? context.name1 || 'User'
-        : message?.name || context.name2 || 'Char';
-      return message ? `${name}: ${cleanStoryContextText(message.mes)}` : '';
+      if (!message) return '';
+      const cleaned = cleanStoryContextText(message.mes);
+      if (!cleaned) return '';
+      const name = message.is_user
+        ? message.name || context.name1 || 'User'
+        : message.name || context.name2 || 'Char';
+      return `${name}: ${cleaned}`;
     }),
-    `${context.name2 || 'Char'}: ${cleanStoryContextText(currentText)}`,
   ].filter(Boolean);
 
   const worldInfo = options.includeWorldInfo

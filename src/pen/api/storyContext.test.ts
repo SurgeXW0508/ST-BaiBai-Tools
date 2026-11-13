@@ -158,4 +158,119 @@ describe('optional story context', () => {
     expect(result.persona).toBe('User persona');
     expect(contextMocks.getCheckWorldInfo).toHaveBeenCalledOnce();
   });
+
+  it('orders World Info scanText newest-first (target floor at depth 0) with true speaker labels', async () => {
+    const capturedScanChats: string[][] = [];
+    contextMocks.getCheckWorldInfo.mockResolvedValue(async (scanChat: string[]) => {
+      capturedScanChats.push(scanChat);
+      return { allActivatedEntries: new Set() };
+    });
+
+    const multiTurnContext: STContext = {
+      ...context,
+      chat: [
+        message('第一轮 AI 回复'),
+        message('第一轮用户提问', { name: '主角', is_user: true }),
+        message('第二轮 AI 回复'),
+        message('第二轮用户提问', { name: '主角', is_user: true }),
+        message('第二轮 AI 终稿'),
+      ],
+    };
+    contextMocks.getContext.mockReturnValue(multiTurnContext);
+
+    await collectRewriteStoryContext(4, '正在改写的第二轮 AI 终稿', 2);
+    await collectRewriteStoryContext(3, '正在改写的第二轮用户提问', 2);
+
+    expect(capturedScanChats).toHaveLength(2);
+    expect(capturedScanChats[0]).toEqual([
+      'Char: 正在改写的第二轮 AI 终稿',
+      '主角: 第二轮用户提问',
+      'Char: 第二轮 AI 回复',
+      '主角: 第一轮用户提问',
+      'Char: 第一轮 AI 回复',
+    ]);
+    expect(capturedScanChats[1]).toEqual([
+      '主角: 正在改写的第二轮用户提问',
+      '主角: 第一轮用户提问',
+      'Char: 第一轮 AI 回复',
+    ]);
+  });
+
+  it('snapshots and restores extensionPrompts["2_floating_prompt"] mutated during dry-run WI scan', async () => {
+    const filterFn = () => true;
+    const extensionPrompts: STContext['extensionPrompts'] = {
+      '2_floating_prompt': {
+        value: '原始作者注释',
+        position: 1,
+        depth: 4,
+        filter: filterFn,
+      },
+    };
+    contextMocks.getContext.mockReturnValue({
+      ...context,
+      extensionPrompts,
+    });
+    contextMocks.getCheckWorldInfo.mockResolvedValue(async () => {
+      extensionPrompts['2_floating_prompt'] = {
+        value: '被 ANTop 污染的注释\n原始作者注释',
+        position: 1,
+        depth: 4,
+      };
+      return { allActivatedEntries: new Set([{ content: 'wi-entry' }]) };
+    });
+
+    const res = await collectRewriteStoryContext(0, 'current floor', 0);
+    expect(res.worldInfo).toBe('expanded:wi-entry');
+    expect(extensionPrompts['2_floating_prompt']).toEqual({
+      value: '原始作者注释',
+      position: 1,
+      depth: 4,
+      filter: filterFn,
+    });
+
+    // 初始不存在 2_floating_prompt 时，干跑新增的槽位也应被彻底移除
+    const emptyPrompts: STContext['extensionPrompts'] = {};
+    contextMocks.getContext.mockReturnValue({
+      ...context,
+      extensionPrompts: emptyPrompts,
+    });
+    contextMocks.getCheckWorldInfo.mockResolvedValue(async () => {
+      emptyPrompts['2_floating_prompt'] = { value: '干跑残留' };
+      return { allActivatedEntries: new Set() };
+    });
+
+    await collectRewriteStoryContext(0, 'current floor', 0);
+    expect('2_floating_prompt' in emptyPrompts).toBe(false);
+  });
+
+  it('prioritizes baibai_exclude_settings over legacy baibai_book exclude lists', async () => {
+    contextMocks.getContext.mockReturnValue({
+      ...context,
+      extensionSettings: {
+        baibai_exclude_settings: {
+          excludedWorldNames: ['shared-blocked-world'],
+          excludedWorldInfoPatterns: ['^status-bar$'],
+        },
+        baibai_book: {
+          excludedWorldNames: ['legacy-only-world'],
+          excludedWorldInfoPatterns: [],
+          renderWorldInfoTemplates: false,
+        },
+      },
+    });
+    contextMocks.getCheckWorldInfo.mockResolvedValue(async () => ({
+      allActivatedEntries: new Set([
+        { world: 'shared-blocked-world', comment: 'lore', content: '不应包含1' },
+        { world: 'allowed-world', comment: 'status-bar', content: '不应包含2' },
+        { world: 'legacy-only-world', comment: 'keep', content: '应保留正文' },
+      ]),
+    }));
+
+    const result = await collectRewriteStoryContext(0, 'current floor', 0, {
+      includeWorldInfo: true,
+      includeCharacterDescription: false,
+      includeUserDescription: false,
+    });
+    expect(result.worldInfo).toBe('应保留正文');
+  });
 });

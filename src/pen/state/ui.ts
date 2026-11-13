@@ -82,6 +82,7 @@ export const ui = reactive({
   speaker: '',
   originalText: '',
   chatId: '',
+  chatIdentity: '',
   sessionRevision: 0,
   paragraphs: [] as ParagraphDraft[],
 });
@@ -99,12 +100,14 @@ export function openPen(
   floor: number,
   speaker: string,
   chatId = '',
+  chatIdentity = '',
 ): void {
   ui.floor = floor;
   ui.floorLabel = `#${floor}`;
   ui.speaker = speaker;
   ui.originalText = text;
   ui.chatId = chatId;
+  ui.chatIdentity = chatIdentity;
   ui.paragraphs = splitParagraphs(text);
   ui.sessionRevision += 1;
   ui.page = 'workspace';

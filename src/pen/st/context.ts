@@ -12,10 +12,28 @@ export interface STMessage {
 export interface STCharacter {
   name: string;
   avatar: string;
+  chat?: string;
   description?: string;
   personality?: string;
   scenario?: string;
   [key: string]: unknown;
+}
+
+export interface STExtensionPromptDescriptor {
+  value?: string;
+  position?: number;
+  depth?: number;
+  scan?: boolean;
+  role?: number;
+  filter?: unknown;
+  [key: string]: unknown;
+}
+
+export interface STEventSource {
+  on?: (event: unknown, handler: (...args: unknown[]) => void) => void;
+  removeListener?: (event: unknown, handler: (...args: unknown[]) => void) => void;
+  off?: (event: unknown, handler: (...args: unknown[]) => void) => void;
+  emit: (event: unknown, ...args: unknown[]) => Promise<void>;
 }
 
 export interface STContext {
@@ -23,12 +41,15 @@ export interface STContext {
   name1: string;
   name2: string;
   characters?: STCharacter[];
+  groups?: Array<{ id?: string; chat_id?: string; [key: string]: unknown }>;
   characterId?: string | number;
   groupId?: string;
   maxContext?: number;
   extensionSettings?: Record<string, unknown>;
+  extensionPrompts?: Record<string, STExtensionPromptDescriptor | undefined>;
+  streamingProcessor?: { isFinished?: boolean } | null;
   saveSettingsDebounced?: () => void;
-  saveChat?: () => Promise<void>;
+  saveChat?: () => Promise<boolean | void>;
   reloadCurrentChat?: () => Promise<void>;
   updateMessageBlock?: (
     messageId: number,
@@ -45,11 +66,7 @@ export interface STContext {
     sanitizerOverrides?: Record<string, unknown>,
     isReasoning?: boolean,
   ) => string;
-  eventSource?: {
-    on?: (event: unknown, handler: (...args: unknown[]) => void) => void;
-    off?: (event: unknown, handler: (...args: unknown[]) => void) => void;
-    emit: (event: unknown, ...args: unknown[]) => Promise<void>;
-  };
+  eventSource?: STEventSource;
   eventTypes?: {
     CHAT_CHANGED?: unknown;
     MESSAGE_EDITED?: unknown;
@@ -69,10 +86,6 @@ export interface STContext {
   callGenericPopup?: (message: string, type: unknown) => Promise<unknown>;
   POPUP_TYPE?: { CONFIRM?: unknown };
   substituteParams?: (content: string) => string;
-  generateRaw?: (params: {
-    prompt: Array<{ role: string; content: string }> | string;
-    responseLength?: number | null;
-  }) => Promise<string>;
   getWorldInfoPrompt?: (
     chat: string[],
     maxContext: number,
@@ -187,4 +200,28 @@ export function getEjsTemplate(): EjsTemplateApi | null {
     return api as EjsTemplateApi;
   }
   return null;
+}
+
+/**
+ * 酒馆原生 EventEmitter 只实现 `removeListener`，不提供 `off`；
+ * 统一优先调用 `removeListener`，并回退兼容测试桩里的 `off`。
+ */
+export function removeStEventListener(
+  eventSource: STEventSource | null | undefined,
+  event: unknown,
+  handler: (...args: unknown[]) => void,
+): void {
+  if (!eventSource || event === undefined) return;
+  if (typeof eventSource.removeListener === 'function') {
+    eventSource.removeListener(event, handler);
+    return;
+  }
+  if (typeof eventSource.off === 'function') {
+    eventSource.off(event, handler);
+  }
+}
+
+export function isChatStreaming(context: STContext | null = getContext()): boolean {
+  const processor = context?.streamingProcessor;
+  return Boolean(processor && processor.isFinished === false);
 }

@@ -1,5 +1,5 @@
 import { openFloorPicker, openPen } from '@pen/state/ui';
-import { getContext } from '@pen/st/context';
+import { getContext, getOpenChatId, getOpenChatIdentity } from '@pen/st/context';
 
 /**
  * 魔法棒「楼层管理器」入口点开时的行为(入口本身由柏宝箱 floorDirectory 注入,
@@ -17,7 +17,8 @@ export function openPenFromMenu(): void {
       editor.value,
       floor,
       message?.querySelector<HTMLElement>('.name_text')?.textContent?.trim() || chatMessage.name,
-      context?.getCurrentChatId?.() ?? '',
+      getOpenChatId(context),
+      getOpenChatIdentity(context),
     );
   } else {
     // 未在编辑态:先给楼层列表,选一楼后自动进入该楼编辑

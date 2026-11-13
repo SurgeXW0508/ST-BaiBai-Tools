@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { formatAnnotations, parseChanges } from '@pen/api/rewrite';
+import { formatAnnotations, parseChanges, rewriteCurrentFloor } from '@pen/api/rewrite';
 import { CHAIN_OF_THOUGHT_PROMPT } from '@pen/api/prompts';
 
 describe('formatAnnotations', () => {
@@ -90,5 +90,23 @@ describe('default reasoning prompt', () => {
     expect(CHAIN_OF_THOUGHT_PROMPT).toContain('<think>');
     expect(CHAIN_OF_THOUGHT_PROMPT).toContain('容易被误改但应当保持原样');
     expect(CHAIN_OF_THOUGHT_PROMPT).toContain('<answer>');
+  });
+});
+
+describe('rewriteCurrentFloor main-API isolation', () => {
+  it('requires an explicit side-channel and refuses channel=null', async () => {
+    await expect(
+      rewriteCurrentFloor({
+        floor: 0,
+        originalText: '原段落',
+        annotations: [{ paragraph: 1, text: '原段落', instructions: ['改短一点'] }],
+        generalInstructions: [],
+        contextRounds: 0,
+        includeWorldInfo: false,
+        includeCharacterDescription: false,
+        includeUserDescription: false,
+        channel: null,
+      }),
+    ).rejects.toThrow('添加并选择副渠道');
   });
 });

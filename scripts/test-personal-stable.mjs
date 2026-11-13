@@ -1285,11 +1285,40 @@ test('Built-in Pen (floorManager) Feature Off, standalone-coexistence, and .giti
     assert.match(gitignoreText, /^!docs\/PERSONAL_MAINTENANCE\.md$/m, '.gitignore must keep docs/PERSONAL_MAINTENANCE.md unignored');
     assert.equal(/^docs\/$/m.test(gitignoreText), false, '.gitignore must not blanket-ignore docs/ directory');
 
-    // 2. Verify Pen lifecycle teardown in src/pen/index.ts and zero Save Generate coupling
-    const penEntry = await readFile(path.join(repoRoot, 'src', 'pen', 'index.ts'), 'utf8');
+    // 2. Verify Pen lifecycle teardown in src/pen/index.ts, side-channel/Main-API/Vertex guards, and zero Save Generate coupling
+    const [penEntry, distBundle, channelParamsSrc, clientSrc, chatPersistenceSrc, floorActionsSrc] = await Promise.all([
+        readFile(path.join(repoRoot, 'src', 'pen', 'index.ts'), 'utf8'),
+        readFile(path.join(repoRoot, 'dist', 'index.js'), 'utf8'),
+        readFile(path.join(repoRoot, 'src', 'pen', 'api', 'channelParams.ts'), 'utf8'),
+        readFile(path.join(repoRoot, 'src', 'pen', 'api', 'client.ts'), 'utf8'),
+        readFile(path.join(repoRoot, 'src', 'pen', 'st', 'chatPersistence.ts'), 'utf8'),
+        readFile(path.join(repoRoot, 'src', 'pen', 'st', 'floorActions.ts'), 'utf8'),
+    ]);
     assert.match(penEntry, /const HOST_ID = 'bby-app-host'/, 'Pen Shadow host ID contract');
     assert.match(penEntry, /versionedAssetUrl\('\.\/index\.css',\s*import\.meta\.url\)/, 'Pen Shadow root CSS path contract');
-    assert.match(penEntry, /export function stopPen\(\)[\s\S]*?unbindEditButtons\(\)[\s\S]*?closePen\(\)[\s\S]*?app\?\.unmount\(\)[\s\S]*?document\.getElementById\(HOST_ID\)\?\.remove\(\)/);
+    assert.match(
+        penEntry,
+        /export function stopPen\(\)[\s\S]*?mountWatchStop\?\.\(\)[\s\S]*?teardownSharedChannels\(\)[\s\S]*?unbindEditButtons\(\)[\s\S]*?closePen\(\)[\s\S]*?app\?\.unmount\(\)[\s\S]*?document\.getElementById\(HOST_ID\)\?\.remove\(\)/,
+        'stopPen() must tear down mountWatchStop, sharedChannels listener, editButtons rAF/observer, Vue app, and Shadow host',
+    );
+    assert.equal(distBundle.includes('generateRaw'), false, 'dist/index.js must not invoke ST generateRaw (protects TempResponseLength & Vertex)');
+    assert.equal(distBundle.includes('跟随主 API'), false, 'dist/index.js must not expose 跟随主 API in personal build');
+    assert.equal(clientSrc.includes('generateRaw'), false, 'src/pen/api/client.ts must not invoke generateRaw');
+    assert.match(channelParamsSrc, /export const EXCLUDABLE_MODEL_PARAMS/, 'channelParams.ts must define explicit EXCLUDABLE_MODEL_PARAMS');
+    for (const forbiddenKey of ['custom_include_headers', 'reverse_proxy', 'proxy_password', 'custom_url', 'chat_completion_source']) {
+        assert.equal(
+            new RegExp(`'${forbiddenKey}'`).test(channelParamsSrc.slice(channelParamsSrc.indexOf('new Set(['), channelParamsSrc.indexOf(']);'))),
+            false,
+            `EXCLUDABLE_MODEL_PARAMS must never allow control field ${forbiddenKey}`,
+        );
+    }
+    assert.match(clientSrc, /filterExcludeParams\(channel\.excludeParams\)/, 'client.ts must sanitize excludeParams via filterExcludeParams');
+    assert.match(clientSrc, /requireValidSideChannelBaseUrl\(rawUrl\)/, 'client.ts must delegate URL validation to requireValidSideChannelBaseUrl');
+    assert.match(clientSrc, /resolveValidEndpointUrl\(channel\.url\)/, 'client.ts must validate channel.url via resolveValidEndpointUrl');
+    assert.match(chatPersistenceSrc, /\/api\/chats\/save/, 'chatPersistence.ts must verify single-chat save endpoint');
+    assert.match(chatPersistenceSrc, /\/api\/chats\/group\/save/, 'chatPersistence.ts must verify group-chat save endpoint');
+    assert.match(floorActionsSrc, /captureDeleteSnapshot/, 'floorActions.ts must lock target snapshot before delete confirmation');
+    assert.match(floorActionsSrc, /isSameChatTarget/, 'floorActions.ts must re-verify chat identity after confirmation');
 
     // 3. Execute src/floorManager.js in an isolated VM context to verify Feature Off & standalone Pen coexistence
     const floorManagerCode = await readFile(path.join(repoRoot, 'src', 'floorManager.js'), 'utf8');

@@ -258,4 +258,214 @@ describe('floor access without rendered messages', () => {
     expect(message.mes).toBe('原文');
     expect(message.swipes).toEqual(['原文']);
   });
+
+  it('rolls back and suppresses DOM/events when ST saveChatConditional swallows HTTP 500', async () => {
+    const emit = vi.fn(async () => undefined);
+    const updateMessageBlock = vi.fn();
+    const message = {
+      name: '角色',
+      is_user: false,
+      is_system: false,
+      mes: '磁盘原文',
+      swipes: ['旧分支', '磁盘原文'],
+      swipe_id: 1,
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ error: 'disk full' }), { status: 500 })),
+    );
+
+    async function saveChatConditional(): Promise<void> {
+      const response = await fetch('/api/chats/save', {
+        method: 'POST',
+        body: JSON.stringify({ file_name: 'chat-a', chat: [message] }),
+      });
+      if (!response.ok) {
+        // 模拟酒馆原生 saveChat 吞掉 HTTP 500 只弹 toastr 不抛异常
+        return;
+      }
+    }
+
+    installContext({
+      chat: [message],
+      characterId: 0,
+      characters: [{ name: '角色', avatar: 'char.png', chat: 'chat-a' }],
+      getCurrentChatId: () => 'chat-a',
+      saveChat: saveChatConditional,
+      updateMessageBlock,
+      eventSource: { emit },
+      eventTypes: {
+        MESSAGE_EDITED: 'edited',
+        MESSAGE_UPDATED: 'updated',
+      },
+    });
+
+    await expect(
+      applyFloorText(0, '磁盘原文', '改写草稿', 'chat-a', 'character:char.png\u0000chat-a'),
+    ).rejects.toThrow('HTTP 500');
+    expect(message.mes).toBe('磁盘原文');
+    expect(message.swipes).toEqual(['旧分支', '磁盘原文']);
+    expect(updateMessageBlock).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it('rolls back when saveChatConditional returns early on save-lock timeout without issuing fetch', async () => {
+    const message = {
+      name: '角色',
+      is_user: false,
+      is_system: false,
+      mes: '原文',
+      swipes: ['原文'],
+      swipe_id: 0,
+    };
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    async function saveChatConditional(): Promise<void> {
+      // 模拟 waitUntilCondition(() => !isChatSaving) 超时直接 return
+      return;
+    }
+
+    installContext({
+      chat: [message],
+      characterId: 0,
+      characters: [{ name: '角色', avatar: 'char.png', chat: 'chat-a' }],
+      getCurrentChatId: () => 'chat-a',
+      saveChat: saveChatConditional,
+    });
+
+    await expect(applyFloorText(0, '原文', '新正文', 'chat-a')).rejects.toThrow('未触发落盘请求');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(message.mes).toBe('原文');
+    expect(message.swipes).toEqual(['原文']);
+  });
+
+  it('treats integrity error followed by successful force overwrite retry as saved', async () => {
+    const message = {
+      name: '角色',
+      is_user: false,
+      is_system: false,
+      mes: '原文',
+      swipes: ['原文'],
+      swipe_id: 0,
+    };
+    let calls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        calls += 1;
+        if (calls === 1) {
+          return new Response(JSON.stringify({ error: 'integrity' }), { status: 400 });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }),
+    );
+
+    async function saveChatConditional(): Promise<void> {
+      const first = await fetch('/api/chats/save', {
+        method: 'POST',
+        body: JSON.stringify({ file_name: 'chat-a', force: false }),
+      });
+      if (!first.ok) {
+        const err = await first.json();
+        if (err.error === 'integrity') {
+          await fetch('/api/chats/save', {
+            method: 'POST',
+            body: JSON.stringify({ file_name: 'chat-a', force: true }),
+          });
+        }
+      }
+    }
+
+    installContext({
+      chat: [message],
+      characterId: 0,
+      characters: [{ name: '角色', avatar: 'char.png', chat: 'chat-a' }],
+      getCurrentChatId: () => 'chat-a',
+      saveChat: saveChatConditional,
+    });
+
+    await expect(applyFloorText(0, '原文', '覆盖后正文', 'chat-a')).resolves.toBe('saved');
+    expect(calls).toBe(2);
+    expect(message.mes).toBe('覆盖后正文');
+  });
+
+  it('rejects temporary chats and active streaming before mutating message memory', async () => {
+    const tempMessage = { name: 'Assistant', is_user: false, is_system: false, mes: '临时正文' };
+    const saveChat = vi.fn(async () => undefined);
+    installContext({
+      chat: [tempMessage],
+      getCurrentChatId: () => undefined,
+      saveChat,
+    });
+
+    await expect(applyFloorText(0, '临时正文', '修改')).rejects.toThrow('尚未创建存档文件');
+    expect(tempMessage.mes).toBe('临时正文');
+    expect(saveChat).not.toHaveBeenCalled();
+
+    installContext({
+      chat: [tempMessage],
+      getCurrentChatId: () => 'chat-a',
+      streamingProcessor: { isFinished: false },
+      saveChat,
+    });
+
+    await expect(applyFloorText(0, '临时正文', '修改', 'chat-a')).rejects.toThrow('正在生成回复');
+    expect(tempMessage.mes).toBe('临时正文');
+    expect(saveChat).not.toHaveBeenCalled();
+  });
+
+  it('detects cross-character chat collision and mid-save chat switch', async () => {
+    const messageA = { name: 'Alice', is_user: false, is_system: false, mes: '原文' };
+    const messageB = { name: 'Bob', is_user: false, is_system: false, mes: '另一角色同文件名' };
+    let activeContext: Record<string, unknown> = {
+      chat: [messageB],
+      characterId: 1,
+      characters: [
+        { name: 'Alice', avatar: 'alice.png', chat: 'same-name' },
+        { name: 'Bob', avatar: 'bob.png', chat: 'same-name' },
+      ],
+      getCurrentChatId: () => 'same-name',
+      saveChat: vi.fn(async () => undefined),
+    };
+    vi.stubGlobal('window', {
+      SillyTavern: {
+        getContext: () => activeContext,
+      },
+    });
+    vi.stubGlobal('document', {
+      querySelector: vi.fn(() => null),
+    });
+
+    await expect(
+      applyFloorText(0, '原文', '新正文', 'same-name', 'character:alice.png\u0000same-name'),
+    ).resolves.toBe('chat-changed');
+
+    const updateMessageBlock = vi.fn();
+    activeContext = {
+      chat: [messageA],
+      characterId: 0,
+      characters: [
+        { name: 'Alice', avatar: 'alice.png', chat: 'chat-a' },
+        { name: 'Bob', avatar: 'bob.png', chat: 'chat-b' },
+      ],
+      getCurrentChatId: () => 'chat-a',
+      updateMessageBlock,
+      saveChat: vi.fn(async () => {
+        activeContext = {
+          ...activeContext,
+          chat: [messageB],
+          characterId: 1,
+          getCurrentChatId: () => 'chat-b',
+        };
+      }),
+    };
+
+    await expect(
+      applyFloorText(0, '原文', '新正文', 'chat-a', 'character:alice.png\u0000chat-a'),
+    ).resolves.toBe('chat-changed');
+    expect(messageA.mes).toBe('原文');
+    expect(updateMessageBlock).not.toHaveBeenCalled();
+  });
 });

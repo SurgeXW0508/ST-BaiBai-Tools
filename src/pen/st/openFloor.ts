@@ -1,4 +1,16 @@
-import { getContext, setMessageText, type STContext, type STMessage } from '@pen/st/context';
+import {
+  assertChatPersistable,
+  expectsHttpChatPersistence,
+  runWithObservedChatSave,
+} from '@pen/st/chatPersistence';
+import {
+  getContext,
+  getOpenChatId,
+  getOpenChatIdentity,
+  setMessageText,
+  type STContext,
+  type STMessage,
+} from '@pen/st/context';
 import { openPen } from '@pen/state/ui';
 
 function findMessage(floor: number): HTMLElement | null {
@@ -44,7 +56,8 @@ export function openFloorInPen(floor: number): boolean {
     chatMessage.mes ?? '',
     floor,
     chatMessage.name || (chatMessage.is_user ? '你' : 'AI'),
-    context.getCurrentChatId?.() ?? '',
+    getOpenChatId(context),
+    getOpenChatIdentity(context),
   );
   return true;
 }
@@ -85,19 +98,36 @@ async function refreshRenderedMessage(
   }
 }
 
+function matchesExpectedTargetChat(
+  context: STContext | null,
+  expectedChatId: string,
+  expectedChatIdentity: string,
+): boolean {
+  if (!context) return false;
+  if (expectedChatIdentity) {
+    return getOpenChatIdentity(context) === expectedChatIdentity;
+  }
+  if (expectedChatId) {
+    return getOpenChatId(context) === expectedChatId;
+  }
+  return true;
+}
+
 /**
- * 直接更新聊天数组并持久化，不要求目标楼层存在于 DOM。
- * 若目标楼层恰好在 ST 编辑态，则以编辑区内容作为并发校验来源。
+ * 直接更新聊天数组并核验持久化结果，不要求目标楼层存在于 DOM。
+ * 若目标楼层恰好在 ST 编辑态，则以编辑区内容作为并发校验来源；
+ * 落盘失败时原子回滚内存消息与当前 swipe，并抛错以便上层保留草稿供重试。
  */
 export async function applyFloorText(
   floor: number,
   expectedText: string,
   nextText: string,
   expectedChatId = '',
+  expectedChatIdentity = '',
 ): Promise<ApplyFloorResult> {
   const context = getContext();
   if (!context?.saveChat) return 'unavailable';
-  if (expectedChatId && context.getCurrentChatId?.() !== expectedChatId) {
+  if (!matchesExpectedTargetChat(context, expectedChatId, expectedChatIdentity)) {
     return 'chat-changed';
   }
 
@@ -105,6 +135,13 @@ export async function applyFloorText(
   if (!message) return 'unavailable';
   const editorText = activeEditorText(floor);
   if ((editorText ?? message.mes) !== expectedText) return 'floor-changed';
+
+  const { chatId: activeChatId, chatIdentity: activeIdentity } = assertChatPersistable(
+    context,
+    '保存修改',
+  );
+  const lockChatId = expectedChatId || activeChatId;
+  const lockIdentity = expectedChatIdentity || activeIdentity;
 
   const previousText = message.mes;
   const currentSwipe =
@@ -116,11 +153,8 @@ export async function applyFloorText(
   const previousSwipeText =
     currentSwipe !== undefined ? message.swipes?.[currentSwipe] : undefined;
 
-  setMessageText(message, nextText);
-
-  try {
-    await context.saveChat();
-  } catch (error) {
+  const rollbackMessage = () => {
+    if (message.mes !== nextText) return;
     message.mes = previousText;
     if (
       currentSwipe !== undefined &&
@@ -130,15 +164,47 @@ export async function applyFloorText(
     ) {
       message.swipes[currentSwipe] = previousSwipeText ?? previousText;
     }
+  };
+
+  setMessageText(message, nextText);
+
+  let observedHttpSave = false;
+  try {
+    const saveChat = context.saveChat;
+    const outcome = await runWithObservedChatSave(
+      {
+        expectedChatId: lockChatId,
+        expectedIdentity: lockIdentity,
+        requireHttpSave: expectsHttpChatPersistence(context),
+      },
+      () => saveChat(),
+    );
+    observedHttpSave = outcome.observedHttpSave;
+  } catch (error) {
+    rollbackMessage();
     throw error;
   }
 
-  await emitMessageEvent(context, context.eventTypes?.MESSAGE_EDITED, floor).catch(error => {
+  const postContext = getContext() ?? context;
+  const stillSameChat =
+    matchesExpectedTargetChat(postContext, lockChatId, lockIdentity) &&
+    postContext.chat?.[floor] === message;
+
+  // 若未观测到指向原聊天的成功 HTTP 落盘且等待期间聊天已切换，回滚原消息并按切聊中止。
+  if (!stillSameChat) {
+    if (!observedHttpSave) {
+      rollbackMessage();
+      return 'chat-changed';
+    }
+    return 'saved';
+  }
+
+  await emitMessageEvent(postContext, postContext.eventTypes?.MESSAGE_EDITED, floor).catch(error => {
     console.warn('[柏宝砚] 楼层已保存，但 MESSAGE_EDITED 事件发送失败', error);
   });
   if (!settleActiveEditor(floor, message.mes)) {
-    await refreshRenderedMessage(context, message, floor);
-    await emitMessageEvent(context, context.eventTypes?.MESSAGE_UPDATED, floor).catch(error => {
+    await refreshRenderedMessage(postContext, message, floor);
+    await emitMessageEvent(postContext, postContext.eventTypes?.MESSAGE_UPDATED, floor).catch(error => {
       console.warn('[柏宝砚] 楼层已保存，但 MESSAGE_UPDATED 事件发送失败', error);
     });
   }

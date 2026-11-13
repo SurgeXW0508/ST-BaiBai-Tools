@@ -3,7 +3,7 @@
 // 不做独立更新检查、Vue App 第一次打开时才挂载(开了悬浮球则启动即挂载)。
 import App from '@pen/App.vue';
 import { initializePenSettings, penSettings } from '@pen/api/settings';
-import { initializeSharedChannels } from '@pen/api/sharedChannels';
+import { initializeSharedChannels, teardownSharedChannels } from '@pen/api/sharedChannels';
 import { bindEditButtons, unbindEditButtons } from '@pen/editButton';
 import { openPenFromMenu } from '@pen/menu';
 import { closePen, ui } from '@pen/state/ui';
@@ -11,13 +11,20 @@ import { guardEditableArrowKeys } from '@pen/st/keyboard';
 import { versionedAssetUrl } from '@pen/version';
 import '@pen/styles/base.css';
 import '@pen/styles/theme.css';
-import { createApp, watch, type App as VueApp } from 'vue';
+import { createApp, watch, type App as VueApp, type WatchStopHandle } from 'vue';
 
 // 与独立版同名:二者由 floorManager 保证不会同时运行
 const HOST_ID = 'bby-app-host';
 
 let started = false;
 let app: VueApp | null = null;
+let mountWatchStop: WatchStopHandle | null = null;
+let pagehideBound = false;
+
+function handlePageHide(): void {
+  app?.unmount();
+  app = null;
+}
 
 function ensureMounted(): void {
   if (app) return;
@@ -42,28 +49,11 @@ function ensureMounted(): void {
   shadow.appendChild(container);
   app = createApp(App);
   app.mount(container);
-}
 
-export function startPen(): void {
-  if (started) return;
-  started = true;
-  bindEditButtons();
-  void Promise.all([initializeSharedChannels(), initializePenSettings()]).then(syncMount);
-}
-
-export function stopPen(): void {
-  if (!started) return;
-  started = false;
-  unbindEditButtons();
-  closePen();
-  app?.unmount();
-  app = null;
-  document.getElementById(HOST_ID)?.remove();
-}
-
-export function openPenWindow(): void {
-  startPen();
-  openPenFromMenu();
+  if (!pagehideBound && typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    pagehideBound = true;
+    window.addEventListener('pagehide', handlePageHide, { once: true });
+  }
 }
 
 // 菜单和编辑区按钮都只改 ui 状态;第一次打开时在这里同步挂载 App。
@@ -73,6 +63,37 @@ function syncMount(): void {
   if (started && (ui.open || penSettings.showOrb)) ensureMounted();
 }
 
-watch(() => ui.open || penSettings.showOrb, syncMount, { flush: 'sync' });
+function ensureMountWatch(): void {
+  if (mountWatchStop) return;
+  mountWatchStop = watch(() => ui.open || penSettings.showOrb, syncMount, { flush: 'sync' });
+}
 
-window.addEventListener('pagehide', () => app?.unmount(), { once: true });
+export function startPen(): void {
+  if (started) return;
+  started = true;
+  ensureMountWatch();
+  bindEditButtons();
+  void Promise.all([initializeSharedChannels(), initializePenSettings()]).then(syncMount);
+}
+
+export function stopPen(): void {
+  if (!started) return;
+  started = false;
+  mountWatchStop?.();
+  mountWatchStop = null;
+  teardownSharedChannels();
+  unbindEditButtons();
+  closePen();
+  app?.unmount();
+  app = null;
+  if (pagehideBound && typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+    window.removeEventListener('pagehide', handlePageHide);
+    pagehideBound = false;
+  }
+  document.getElementById(HOST_ID)?.remove();
+}
+
+export function openPenWindow(): void {
+  startPen();
+  openPenFromMenu();
+}

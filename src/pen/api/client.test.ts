@@ -1,6 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ApiChannel } from '@pen/api/sharedChannels';
-import { buildRequestBody } from './client';
+import {
+  buildRequestBody,
+  fetchModels,
+  requestCompletion,
+  sanitizeExcludeParams,
+  testChannel,
+} from './client';
 
 const channel: ApiChannel = {
   id: 'ch1',
@@ -16,6 +22,10 @@ const channel: ApiChannel = {
   excludeParams: [],
   reasoningEffort: '',
 };
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('buildRequestBody：思考强度与两条源分支', () => {
   const msgs = [{ role: 'user' as const, content: 'hi' }];
@@ -77,5 +87,80 @@ describe('buildRequestBody：思考强度与两条源分支', () => {
     expect(
       build({ excludeParams: ['temperature'], reasoningEffort: 'high' }).temperature,
     ).toBeUndefined();
+  });
+
+  it('excludeParams 绝不能删除认证、路由或核心消息控制字段', () => {
+    const hostileExcludes = [
+      'custom_include_headers',
+      'custom_url',
+      'custom_include_body',
+      'reverse_proxy',
+      'proxy_password',
+      'chat_completion_source',
+      'model',
+      'messages',
+      'stream',
+      'temperature',
+    ];
+    const sanitized = sanitizeExcludeParams(hostileExcludes);
+    expect(sanitized.allowed).toEqual(['temperature']);
+    expect(sanitized.rejected).toContain('custom_include_headers');
+    expect(sanitized.rejected).toContain('reverse_proxy');
+
+    const customBody = build({ reasoningEffort: 'high', excludeParams: hostileExcludes });
+    expect(customBody.temperature).toBeUndefined();
+    expect(customBody.chat_completion_source).toBe('custom');
+    expect(customBody.custom_url).toBe('https://api.example.com/v1');
+    expect(JSON.parse(customBody.custom_include_headers as string)).toEqual({
+      Authorization: 'Bearer k',
+    });
+    expect(JSON.parse(customBody.custom_include_body as string)).toEqual({
+      reasoning_effort: 'high',
+    });
+    expect(customBody.model).toBe('m');
+    expect(customBody.messages).toEqual(msgs);
+    expect(customBody.stream).toBe(false);
+
+    const openaiBody = build({ excludeParams: hostileExcludes });
+    expect(openaiBody.temperature).toBeUndefined();
+    expect(openaiBody.chat_completion_source).toBe('openai');
+    expect(openaiBody.reverse_proxy).toBe('https://api.example.com/v1');
+    expect(openaiBody.proxy_password).toBe('k');
+    expect(openaiBody.model).toBe('m');
+    expect(openaiBody.messages).toEqual(msgs);
+  });
+
+  it('excludeParams 排除 reasoning_effort 时自动回退 openai 源且不发空 custom_include_body', () => {
+    const body = build({
+      reasoningEffort: 'high',
+      excludeParams: ['reasoning_effort'],
+    });
+    expect(body.chat_completion_source).toBe('openai');
+    expect(body.reverse_proxy).toBe('https://api.example.com/v1');
+    expect(body.proxy_password).toBe('k');
+    expect(body.custom_include_body).toBeUndefined();
+  });
+
+  it('拒绝空地址与非 http(s) 地址，阻断回退使用酒馆主 OpenAI 密钥', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    vi.stubGlobal('window', {
+      SillyTavern: {
+        getContext: () => ({
+          getRequestHeaders: () => ({}),
+        }),
+      },
+      setTimeout,
+      clearTimeout,
+    });
+
+    for (const badUrl of ['', '   ', '/v1', 'ftp://api.example.com', 'javascript:alert(1)']) {
+      expect(() => buildRequestBody({ ...channel, url: badUrl }, msgs, badUrl)).toThrow();
+      await expect(requestCompletion({ ...channel, url: badUrl }, msgs)).rejects.toThrow();
+      await expect(fetchModels({ url: badUrl, key: 'k', timeoutSec: 10 })).rejects.toThrow();
+      const testRes = await testChannel({ ...channel, url: badUrl });
+      expect(testRes.ok).toBe(false);
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

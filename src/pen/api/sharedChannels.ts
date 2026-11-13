@@ -1,3 +1,4 @@
+import { filterExcludeParams, sanitizeExcludeParams } from '@pen/api/channelParams';
 import { reactive, ref } from 'vue';
 
 export interface ApiChannel {
@@ -54,6 +55,7 @@ interface ExtensionInfo {
 
 const SHARED_CHANNELS_KEY = 'baibai_api_channels';
 const LEGACY_BOOK_SETTINGS_KEY = 'baibai_book';
+const LEGACY_IMAGE_SETTINGS_KEY = 'baibai_image';
 const SHARED_CHANNELS_EVENT = 'st-baibai-api-channels:changed';
 const SHARED_CHANNELS_SCHEMA_VERSION = 1;
 const MIN_SHARED_BOOK_VERSION = '1.1.3';
@@ -74,6 +76,7 @@ let revision = 0;
 let channelsFingerprint = '';
 let listenerBound = false;
 let initialized = false;
+let initRunId = 0;
 let channelSequence = 0;
 
 function getContext(): STContext | null {
@@ -94,11 +97,14 @@ function cloneChannel(channel: ApiChannel): ApiChannel {
 
 function normalizeChannel(raw: unknown): ApiChannel {
   const channel = raw && typeof raw === 'object' ? (raw as Partial<ApiChannel>) : {};
-  const excludeParams = raw && typeof raw === 'object'
-    ? (raw as { excludeParams?: unknown }).excludeParams
-    : undefined;
+  const excludeParams =
+    raw && typeof raw === 'object'
+      ? (raw as { excludeParams?: unknown }).excludeParams
+      : undefined;
   return {
-    id: typeof channel.id === 'string' ? channel.id : `ch_${Date.now()}_${++channelSequence}`,
+    id: typeof channel.id === 'string' && channel.id.trim()
+      ? channel.id
+      : `ch_${Date.now()}_${++channelSequence}`,
     name: typeof channel.name === 'string' ? channel.name : '新渠道',
     url: typeof channel.url === 'string' ? channel.url : '',
     key: typeof channel.key === 'string' ? channel.key : '',
@@ -111,15 +117,21 @@ function normalizeChannel(raw: unknown): ApiChannel {
         : 180,
     stream: typeof channel.stream === 'boolean' ? channel.stream : false,
     prefill: typeof channel.prefill === 'boolean' ? channel.prefill : true,
-    excludeParams: Array.isArray(excludeParams)
-      ? excludeParams.filter((item): item is string => typeof item === 'string')
-      : typeof excludeParams === 'string'
-        ? excludeParams.split(',').map(item => item.trim()).filter(Boolean)
-        : [],
+    excludeParams: filterExcludeParams(excludeParams),
     // 后加字段：老渠道无此键 → 空串（auto，不发参数），行为与加字段前完全一致
     reasoningEffort:
       typeof channel.reasoningEffort === 'string' ? channel.reasoningEffort.trim() : '',
   };
+}
+
+function rawStoreHasRejectedExcludeParams(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object') return false;
+  const list = (raw as { channels?: unknown }).channels;
+  if (!Array.isArray(list)) return false;
+  return list.some(item => {
+    if (!item || typeof item !== 'object') return false;
+    return sanitizeExcludeParams((item as { excludeParams?: unknown }).excludeParams).rejected.length > 0;
+  });
 }
 
 function replaceChannels(next: ApiChannel[]): void {
@@ -144,18 +156,37 @@ function readStore(raw: unknown): SharedChannelsStore | null {
   };
 }
 
-function legacyBookChannels(): ApiChannel[] {
-  const raw = getContext()?.extensionSettings?.[LEGACY_BOOK_SETTINGS_KEY];
+function readLegacyChannelsFromKey(settingsKey: string): ApiChannel[] {
+  const raw = getContext()?.extensionSettings?.[settingsKey];
   if (!raw || typeof raw !== 'object') return [];
   const list = (raw as { channels?: unknown }).channels;
   return Array.isArray(list) ? list.map(normalizeChannel) : [];
+}
+
+function legacyBookChannels(): ApiChannel[] {
+  return readLegacyChannelsFromKey(LEGACY_BOOK_SETTINGS_KEY);
+}
+
+function legacyImageChannels(): ApiChannel[] {
+  return readLegacyChannelsFromKey(LEGACY_IMAGE_SETTINGS_KEY);
+}
+
+function legacySeedChannels(): ApiChannel[] {
+  const merged: ApiChannel[] = [];
+  const seenIds = new Set<string>();
+  for (const channel of [...legacyBookChannels(), ...legacyImageChannels()]) {
+    if (seenIds.has(channel.id)) continue;
+    seenIds.add(channel.id);
+    merged.push(channel);
+  }
+  return merged;
 }
 
 function readSharedChannels(): SharedChannelsStore | null {
   return readStore(getContext()?.extensionSettings?.[SHARED_CHANNELS_KEY]);
 }
 
-function persistSharedChannels(): void {
+function persistSharedChannels(dispatch = true): void {
   const ctx = getContext();
   if (!ctx?.extensionSettings) return;
   revision += 1;
@@ -167,38 +198,78 @@ function persistSharedChannels(): void {
   ctx.extensionSettings[SHARED_CHANNELS_KEY] = store;
   channelsFingerprint = fingerprint(store.channels);
   ctx.saveSettingsDebounced?.();
-  window.dispatchEvent(
-    new CustomEvent(SHARED_CHANNELS_EVENT, {
-      detail: { revision, source: 'ST-BaiBai-Pen' },
-    }),
-  );
+  if (dispatch && typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+    window.dispatchEvent(
+      new CustomEvent(SHARED_CHANNELS_EVENT, {
+        detail: { revision, source: 'ST-BaiBai-Pen' },
+      }),
+    );
+  }
 }
 
+/**
+ * 消费者建仓协议（与柏宝绘 ST-BaiBai-Image 对齐）：
+ * 1. 当共享仓不存在时，合并读取 `baibai_book` 与 `baibai_image` 的存量渠道作为种子；
+ *    若种子为空，绝不写入空的 `baibai_api_channels` 占位，防止把后启动的柏宝绘/柏宝书同步成空；
+ * 2. 若共享仓处于 `{ revision <= 1, channels: [] }` 的空占位状态（用户新增再删除至少使 revision >= 2），
+ *    且 `baibai_book` / `baibai_image` 存有非空旧渠道，自动播种自愈并递增 revision；
+ * 3. 若存量共享仓含非法的控制字段 `excludeParams`，在归一化后自动写回清洗后的配置。
+ */
 function hydrateSharedChannels(): void {
-  const stored = readSharedChannels();
+  const rawShared = getContext()?.extensionSettings?.[SHARED_CHANNELS_KEY];
+  const stored = readStore(rawShared);
   if (stored) {
+    if (stored.channels.length === 0 && stored.revision <= 1) {
+      const seed = legacySeedChannels();
+      if (seed.length > 0) {
+        revision = Math.max(revision, stored.revision);
+        replaceChannels(seed);
+        persistSharedChannels(true);
+        return;
+      }
+    }
     revision = Math.max(revision, stored.revision);
     channelsFingerprint = fingerprint(stored.channels);
     replaceChannels(stored.channels);
+    if (sharingState.mode !== 'legacy-readonly' && rawStoreHasRejectedExcludeParams(rawShared)) {
+      persistSharedChannels(true);
+    }
     return;
   }
-  replaceChannels(legacyBookChannels());
-  persistSharedChannels();
+
+  const seed = legacySeedChannels();
+  replaceChannels(seed);
+  channelsFingerprint = fingerprint(channels);
+  if (seed.length > 0) {
+    persistSharedChannels(false);
+  }
+}
+
+function handleSharedChannelsEvent(): void {
+  if (sharingState.mode === 'legacy-readonly') return;
+  const stored = readSharedChannels();
+  if (!stored) return;
+  revision = Math.max(revision, stored.revision);
+  const nextFingerprint = fingerprint(stored.channels);
+  if (nextFingerprint === channelsFingerprint) return;
+  channelsFingerprint = nextFingerprint;
+  replaceChannels(stored.channels);
 }
 
 function bindSharedListener(): void {
-  if (listenerBound) return;
+  if (listenerBound || typeof window === 'undefined' || typeof window.addEventListener !== 'function') {
+    return;
+  }
   listenerBound = true;
-  window.addEventListener(SHARED_CHANNELS_EVENT, () => {
-    if (sharingState.mode === 'legacy-readonly') return;
-    const stored = readSharedChannels();
-    if (!stored) return;
-    revision = Math.max(revision, stored.revision);
-    const nextFingerprint = fingerprint(stored.channels);
-    if (nextFingerprint === channelsFingerprint) return;
-    channelsFingerprint = nextFingerprint;
-    replaceChannels(stored.channels);
-  });
+  window.addEventListener(SHARED_CHANNELS_EVENT, handleSharedChannelsEvent);
+}
+
+export function teardownSharedChannels(): void {
+  initRunId += 1;
+  if (listenerBound && typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+    window.removeEventListener(SHARED_CHANNELS_EVENT, handleSharedChannelsEvent);
+  }
+  listenerBound = false;
 }
 
 function parseVersion(version: string): number[] {
@@ -316,13 +387,26 @@ export async function performBookUpdate(): Promise<void> {
 }
 
 export async function initializeSharedChannels(): Promise<void> {
-  if (initialized) return;
-  initialized = true;
+  if (initialized) {
+    bindSharedListener();
+    if (sharingState.mode !== 'legacy-readonly' && getContext()?.extensionSettings) {
+      hydrateSharedChannels();
+    }
+    return;
+  }
+
+  const runId = ++initRunId;
   await waitForContext();
+  if (runId !== initRunId) return;
+
   bindSharedListener();
 
   const installed = await discoverBook();
+  if (runId !== initRunId) return;
   const bookApi = currentBookApi() ?? (installed ? await waitForBookApi() : null);
+  if (runId !== initRunId) return;
+
+  initialized = true;
   sharingState.bookInstalled = !!installed || !!bookApi;
   sharingState.bookVersion = bookApi?.pluginVersion ?? '';
 
@@ -343,6 +427,21 @@ export async function initializeSharedChannels(): Promise<void> {
   }
 
   sharingState.ready = true;
+}
+
+export function resetSharedChannelsStateForTests(): void {
+  teardownSharedChannels();
+  initialized = false;
+  revision = 0;
+  channelsFingerprint = '';
+  channels.splice(0, channels.length);
+  sharingState.ready = false;
+  sharingState.mode = 'standalone';
+  sharingState.bookInstalled = false;
+  sharingState.bookVersion = '';
+  sharingState.updateError = '';
+  sharingState.updating = false;
+  bookUpdatePromptOpen.value = false;
 }
 
 export function canEditChannels(): boolean {
@@ -372,7 +471,7 @@ export function saveSharedChannel(channel: ApiChannel): void {
   const index = channels.findIndex(item => item.id === normalized.id);
   if (index >= 0) channels[index] = normalized;
   else channels.push(normalized);
-  persistSharedChannels();
+  persistSharedChannels(true);
 }
 
 export function removeSharedChannel(id: string): void {
@@ -380,6 +479,6 @@ export function removeSharedChannel(id: string): void {
   const index = channels.findIndex(channel => channel.id === id);
   if (index >= 0) {
     channels.splice(index, 1);
-    persistSharedChannels();
+    persistSharedChannels(true);
   }
 }

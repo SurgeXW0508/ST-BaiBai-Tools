@@ -1,5 +1,5 @@
 import { openPen } from '@pen/state/ui';
-import { getContext } from '@pen/st/context';
+import { getContext, getOpenChatId, getOpenChatIdentity } from '@pen/st/context';
 import { penIconSvg } from '@pen/penIcon';
 
 const ACTION_CLASS = 'bby-message-rewrite-action';
@@ -44,7 +44,8 @@ function createAction(kind: 'top' | 'bottom'): HTMLDivElement {
       editor.value,
       floor,
       message?.querySelector<HTMLElement>('.name_text')?.textContent?.trim() || chatMessage.name,
-      context?.getCurrentChatId?.() ?? '',
+      getOpenChatId(context),
+      getOpenChatIdentity(context),
     );
   };
 
@@ -84,18 +85,22 @@ function syncButtons(): void {
 
 let observer: MutationObserver | null = null;
 let retryTimer = 0;
+let frame = 0;
+let bound = false;
 
 export function bindEditButtons(): void {
-  if (observer || retryTimer) return;
+  if (bound) return;
+  bound = true;
   ensureStyle();
   const install = () => {
+    if (!bound) return false;
     const chat = document.querySelector('#chat');
     if (!chat) return false;
-    let frame = 0;
     observer = new MutationObserver(() => {
-      if (frame) return;
+      if (!bound || frame) return;
       frame = requestAnimationFrame(() => {
         frame = 0;
+        if (!bound) return;
         syncButtons();
       });
     });
@@ -106,17 +111,32 @@ export function bindEditButtons(): void {
 
   if (install()) return;
   retryTimer = window.setInterval(() => {
+    if (!bound) {
+      window.clearInterval(retryTimer);
+      retryTimer = 0;
+      return;
+    }
     if (!install()) return;
     window.clearInterval(retryTimer);
     retryTimer = 0;
   }, 500);
 }
 
-/** 关掉「新版楼层管理器」时撤掉观察器和已插入的按钮 */
+/** 关掉「新版楼层管理器」时撤掉观察器、挂起帧和已插入的按钮 */
 export function unbindEditButtons(): void {
+  bound = false;
+  if (frame) {
+    if (typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(frame);
+    }
+    frame = 0;
+  }
   observer?.disconnect();
   observer = null;
-  window.clearInterval(retryTimer);
-  retryTimer = 0;
+  if (retryTimer) {
+    window.clearInterval(retryTimer);
+    retryTimer = 0;
+  }
   document.querySelectorAll(`.${ACTION_CLASS}`).forEach(button => button.remove());
+  document.getElementById(STYLE_ID)?.remove();
 }

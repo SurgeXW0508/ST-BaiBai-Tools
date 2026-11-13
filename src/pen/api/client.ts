@@ -1,10 +1,18 @@
+import {
+  EXCLUDABLE_MODEL_PARAMS,
+  filterExcludeParams,
+  normalizeSideChannelBaseUrl,
+  requireValidSideChannelBaseUrl,
+  sanitizeExcludeParams,
+} from '@pen/api/channelParams';
 import type { ApiChannel } from '@pen/api/sharedChannels';
 import { getContext } from '@pen/st/context';
+
+export { EXCLUDABLE_MODEL_PARAMS, filterExcludeParams, sanitizeExcludeParams };
 
 const GENERATE_URL = '/api/backends/chat-completions/generate';
 const STATUS_URL = '/api/backends/chat-completions/status';
 const DEFAULT_TIMEOUT_SEC = 180;
-const MAIN_API_RESPONSE_LENGTH = 65535;
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -18,16 +26,16 @@ export class ApiError extends Error {
   }
 }
 
-function normalizeUrl(url: string): string {
-  const value = url.trim().replace(/\/+$/, '');
-  if (!value) return value;
-  if (/\/chat\/completions$/i.test(value)) return value.replace(/\/chat\/completions$/i, '');
-  if (/^https?:\/\/[^/?#]+$/i.test(value)) return `${value}/v1`;
-  return value;
-}
-
 function alternateUrl(url: string): string {
   return /\/v1$/i.test(url) ? url.replace(/\/v1$/i, '') : `${url}/v1`;
+}
+
+function resolveValidEndpointUrl(rawUrl: string): string {
+  try {
+    return requireValidSideChannelBaseUrl(rawUrl);
+  } catch (error) {
+    throw new ApiError(error instanceof Error ? error.message : String(error));
+  }
 }
 
 async function withTimeout<T>(
@@ -99,69 +107,57 @@ async function readSseContent(response: Response): Promise<string> {
 }
 
 /**
- * 构造发给 ST 代理的请求体（纯函数，便于测两条分支的产物）。
+ * 构造发给 ST 代理的请求体（两阶段结构隔离：采样参数层 + 不可变路由/认证信封层）。
  *
- * 两条分支，按渠道有没有设思考强度二选一：
- *
- * ① 未设（reasoningEffort 为空 = auto）：走 `chat_completion_source: 'openai'`，
- *    与加本功能之前**逐字节一致**——存量用户零变化。
- *
- * ② 已设：走 `'custom'`。因为 ST 代理对 openai 源的 reasoning_effort 卡**模型名白名单**
- *    （src/constants.js 的 OPENAI_REASONING_EFFORT_MODELS，精确匹配 o1/o3/gpt-5 那批），
- *    模型名对不上就静默丢弃、还照样返回 200（实测确认），用户设了却无效且看不出来。
- *    custom 源的 custom_include_body 由服务端 mergeObjectWithYaml 直接并进上游请求体，
- *    不过任何白名单，任意字段/嵌套对象都能透传。
- *
- * 两条路都仍然走 ST 服务端转发（同一个 /generate 端点），没有浏览器直连，
- * 因此 CORS、密钥不落浏览器、SSE 转发等性质完全不变。
- *
- * custom 源的两个坑（都已规避）：
- * - 它**不读 proxy_password**，只读 ST 自己存的 Custom 密钥，所以 key 必须靠
- *   custom_include_headers 注入 Authorization（服务端 `...headers` 排在默认
- *   Authorization 之后，覆盖成立）；
- * - custom_include_* 是 YAML 字符串且**解析失败会静默忽略**（util.js 的 catch 是空的）。
- *   key 里带 `:` `#` `{` 或以 `*` 开头都会让 YAML 解析炸 → header 没注入 →
- *   退回用 ST 的 Custom 密钥，可能把用户另一个服务商的 key 发到本端点。
- *   故一律用 JSON.stringify 生成（YAML 是 JSON 的超集），转义交给它，不手拼。
- *
- * （与柏宝绘/柏宝书 src/api/client.ts 的同名函数同源，行为保持一致。）
+ * 1. 阶段 1 仅组装可被 `EXCLUDABLE_MODEL_PARAMS` 白名单排除的模型采样参数；
+ * 2. 阶段 2 强制校验 `http(s)://` 端点地址，并固定写入 `chat_completion_source`、
+ *    地址与凭据绑定（`openai` 源的 `reverse_proxy` + `proxy_password`，或 `custom` 源的
+ *    `custom_url` + 显式 `Authorization` 头）、`model`、`messages`、`stream`。
+ *    控制与认证字段在结构上永远不经过 `excludeParams` 删除逻辑，彻底阻断回退使用酒馆主密钥。
  */
 export function buildRequestBody(
   channel: ApiChannel,
   messages: ChatMessage[],
   reverseProxy: string,
 ): Record<string, unknown> {
-  const effort = channel.reasoningEffort?.trim() ?? '';
-  const common = {
-    model: channel.model,
-    messages,
+  const endpointUrl = resolveValidEndpointUrl(reverseProxy);
+  const excluded = new Set(filterExcludeParams(channel.excludeParams));
+  const rawEffort = channel.reasoningEffort?.trim() ?? '';
+  const effort = excluded.has('reasoning_effort') ? '' : rawEffort;
+
+  const samplingParams: Record<string, unknown> = {
     temperature: channel.temperature ?? 1,
     max_tokens: channel.maxTokens ?? 65535,
-    stream: channel.stream ?? false,
     presence_penalty: 0,
     frequency_penalty: 0,
   };
-
-  const body: Record<string, unknown> = effort
-    ? {
-        chat_completion_source: 'custom',
-        custom_url: reverseProxy,
-        custom_include_headers: JSON.stringify({ Authorization: `Bearer ${channel.key || ''}` }),
-        custom_include_body: JSON.stringify({ reasoning_effort: effort }),
-        ...common,
-      }
-    : {
-        chat_completion_source: 'openai',
-        reverse_proxy: reverseProxy,
-        proxy_password: channel.key || '',
-        ...common,
-      };
-
-  for (const parameter of channel.excludeParams ?? []) {
-    const key = parameter.trim();
-    if (key) delete body[key];
+  for (const key of excluded) {
+    delete samplingParams[key];
   }
-  return body;
+
+  const corePayload = {
+    model: channel.model,
+    messages,
+    ...samplingParams,
+    stream: channel.stream ?? false,
+  };
+
+  if (effort) {
+    return {
+      chat_completion_source: 'custom',
+      custom_url: endpointUrl,
+      custom_include_headers: JSON.stringify({ Authorization: `Bearer ${channel.key || ''}` }),
+      custom_include_body: JSON.stringify({ reasoning_effort: effort }),
+      ...corePayload,
+    };
+  }
+
+  return {
+    chat_completion_source: 'openai',
+    reverse_proxy: endpointUrl,
+    proxy_password: channel.key || '',
+    ...corePayload,
+  };
 }
 
 async function requestAtUrl(
@@ -205,43 +201,30 @@ async function requestAtUrl(
   });
 }
 
-export function requestCompletion(
+export async function requestCompletion(
   channel: ApiChannel,
   messages: ChatMessage[],
   signal?: AbortSignal,
 ): Promise<string> {
-  return requestAtUrl(channel, messages, normalizeUrl(channel.url), signal);
-}
-
-export async function requestViaMainApi(
-  messages: ChatMessage[],
-  signal?: AbortSignal,
-): Promise<string> {
-  const context = getContext();
-  if (typeof context?.generateRaw !== 'function') {
-    throw new ApiError('当前 SillyTavern 版本不支持跟随主 API');
-  }
-  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-  const content = (
-    await context.generateRaw({
-      prompt: messages,
-      responseLength: MAIN_API_RESPONSE_LENGTH,
-    })
-  )?.trim();
-  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-  if (!content) throw new ApiError('主 API 返回空内容');
-  return content;
+  return requestAtUrl(channel, messages, resolveValidEndpointUrl(channel.url), signal);
 }
 
 export async function testChannel(channel: ApiChannel): Promise<{ ok: boolean; message: string }> {
-  const primaryUrl = normalizeUrl(channel.url);
+  let primaryUrl: string;
+  try {
+    primaryUrl = resolveValidEndpointUrl(channel.url);
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
   try {
     const reply = await requestAtUrl(
       channel,
       [{ role: 'user', content: '回复“ok”两个字符即可。' }],
       primaryUrl,
     );
-    if (channel.url.trim().replace(/\/+$/, '') !== primaryUrl) channel.url = primaryUrl;
+    if (normalizeSideChannelBaseUrl(channel.url) === primaryUrl && channel.url.trim().replace(/\/+$/, '') !== primaryUrl) {
+      channel.url = primaryUrl;
+    }
     return { ok: true, message: `连通正常，返回：${reply.slice(0, 40)}` };
   } catch (error) {
     if (!(error instanceof ApiError) || (error.status !== 404 && error.status !== 405)) {
@@ -267,7 +250,7 @@ export async function fetchModels(
 ): Promise<string[]> {
   const context = getContext();
   if (!context) throw new ApiError('SillyTavern 上下文不可用');
-  if (!channel.url.trim()) throw new ApiError('请先填写 API 地址');
+  const reverseProxy = resolveValidEndpointUrl(channel.url);
 
   const timeoutSec =
     Number.isFinite(channel.timeoutSec) && channel.timeoutSec > 0
@@ -279,7 +262,7 @@ export async function fetchModels(
       headers: context.getRequestHeaders(),
       body: JSON.stringify({
         chat_completion_source: 'openai',
-        reverse_proxy: normalizeUrl(channel.url),
+        reverse_proxy: reverseProxy,
         proxy_password: channel.key || '',
       }),
       signal,

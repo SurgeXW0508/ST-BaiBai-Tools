@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { fetchModels, testChannel as testApiChannel } from '@pen/api/client';
+import { fetchModels, sanitizeExcludeParams, testChannel as testApiChannel } from '@pen/api/client';
 import { CHAIN_OF_THOUGHT_PROMPT, JAILBREAK_PROMPT } from '@pen/api/prompts';
 import {
   rewriteCurrentFloor,
@@ -53,7 +53,13 @@ import {
   ui,
   type AppPage,
 } from '@pen/state/ui';
-import { getContext, getOpenChatId, getOpenChatIdentity } from '@pen/st/context';
+import {
+  getContext,
+  getOpenChatId,
+  getOpenChatIdentity,
+  removeStEventListener,
+  type STEventSource,
+} from '@pen/st/context';
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue';
 
 interface WorkspaceDraftSnapshot {
@@ -222,6 +228,13 @@ function setReviewRowDecision(row: ReviewRow, decision: 'accept' | 'reject'): vo
   }
 }
 
+function resolvePreferredChannelId(preferredId = penSettings.defaultChannelId): string {
+  if (preferredId && channels.some(channel => channel.id === preferredId)) {
+    return preferredId;
+  }
+  return channels[0]?.id ?? '';
+}
+
 watch(
   () => ui.sessionRevision,
   () => {
@@ -243,11 +256,7 @@ watch(
     generationError.value = '';
     contextSummary.value = '';
     contextRounds.value = penSettings.defaultContextRounds;
-    selectedChannelId.value =
-      penSettings.defaultChannelId &&
-      channels.some(channel => channel.id === penSettings.defaultChannelId)
-        ? penSettings.defaultChannelId
-        : '';
+    selectedChannelId.value = resolvePreferredChannelId();
     ui.stage = 'annotate';
   },
   { immediate: true },
@@ -271,13 +280,14 @@ watch(
 watch(
   () => channels.map(channel => channel.id),
   ids => {
-    if (selectedChannelId.value && !ids.includes(selectedChannelId.value)) {
-      selectedChannelId.value = '';
-    }
     if (penSettings.defaultChannelId && !ids.includes(penSettings.defaultChannelId)) {
-      penSettings.defaultChannelId = '';
+      penSettings.defaultChannelId = ids[0] ?? '';
+    }
+    if (!selectedChannelId.value || !ids.includes(selectedChannelId.value)) {
+      selectedChannelId.value = resolvePreferredChannelId();
     }
   },
+  { immediate: true },
 );
 
 watch(
@@ -334,11 +344,7 @@ function captureWorkspaceDraft(): WorkspaceDraftSnapshot {
 }
 
 function restoreWorkspaceDraft(draft: WorkspaceDraftSnapshot): void {
-  selectedChannelId.value =
-    draft.selectedChannelId &&
-    channels.some(channel => channel.id === draft.selectedChannelId)
-      ? draft.selectedChannelId
-      : '';
+  selectedChannelId.value = resolvePreferredChannelId(draft.selectedChannelId);
   contextRounds.value = draft.contextRounds;
   carryWorldbook.value = draft.carryWorldbook;
   carryCharDesc.value = draft.carryCharDesc;
@@ -379,9 +385,8 @@ const channelMenuOpen = ref(false);
 const channelMenu = ref<HTMLElement | null>(null);
 
 const selectedChannelLabel = computed(() => {
-  if (!selectedChannelId.value) return '跟随主 API';
   const channel = channels.find(item => item.id === selectedChannelId.value);
-  if (!channel) return '跟随主 API';
+  if (!channel) return channels.length ? '请选择副渠道' : '未配置副渠道';
   return `${channel.name || '未命名渠道'} · ${channel.model || '未设模型'}`;
 });
 
@@ -393,6 +398,14 @@ function pickChannel(id: string): void {
   selectedChannelId.value = id;
   rememberSelectedChannel();
   channelMenuOpen.value = false;
+}
+
+function goToAddChannel(): void {
+  channelMenuOpen.value = false;
+  ui.page = 'settings';
+  if (sharingState.ready && canEditChannels()) {
+    openChannel();
+  }
 }
 
 function onChannelMenuDocDown(event: PointerEvent): void {
@@ -570,32 +583,36 @@ watch(floorPage, () => {
   floorPanel.value?.scrollTo({ top: 0 });
 });
 
+function clearActiveFloorState(): void {
+  ui.floor = null;
+  ui.floorLabel = '';
+  ui.speaker = '';
+  ui.originalText = '';
+  ui.chatId = '';
+  ui.chatIdentity = '';
+  ui.paragraphs = [];
+}
+
 // ST 的 chat 不是响应式的,computed 会缓存旧聊天;每次进入楼层页时重建
 function refreshFloorRows(): void {
   const context = getContext();
   const chatId = getOpenChatId(context);
+  const chatIdentity = getOpenChatIdentity(context);
   floorChatOpen.value = !!chatId;
   if (!chatId) {
     floorRows.value = [];
-    ui.floor = null;
-    ui.floorLabel = '';
-    ui.speaker = '';
-    ui.originalText = '';
-    ui.chatId = '';
-    ui.paragraphs = [];
+    clearActiveFloorState();
     floorPage.value = 0;
     floorQuery.value = '';
     floorSearchOpen.value = false;
     return;
   }
 
-  if (ui.chatId && ui.chatId !== chatId) {
-    ui.floor = null;
-    ui.floorLabel = '';
-    ui.speaker = '';
-    ui.originalText = '';
-    ui.chatId = '';
-    ui.paragraphs = [];
+  if (
+    (ui.chatIdentity && ui.chatIdentity !== chatIdentity) ||
+    (ui.chatId && ui.chatId !== chatId)
+  ) {
+    clearActiveFloorState();
   }
 
   const chat = context?.chat ?? [];
@@ -628,33 +645,45 @@ function enterFloor(floor: number): void {
   if (!ok) showToast('无法打开该楼层');
 }
 
+const floorActionBusy = ref(false);
+
 async function onToggleFloorHidden(floor: number): Promise<void> {
+  if (floorActionBusy.value) return;
+  floorActionBusy.value = true;
   try {
     const nowHidden = await toggleFloorHidden(floor);
     refreshFloorRows();
     showToast(nowHidden ? `已隐藏第 ${floor} 层` : `已显示第 ${floor} 层`);
   } catch (error) {
+    refreshFloorRows();
     showToast(error instanceof Error ? error.message : '操作失败');
+  } finally {
+    floorActionBusy.value = false;
   }
 }
 
 async function onDeleteFloor(floor: number): Promise<void> {
+  if (floorActionBusy.value) return;
+  floorActionBusy.value = true;
+  const targetIdentity = getOpenChatIdentity();
   try {
     const deleted = await deleteFloorsFrom(floor);
     if (!deleted) return;
     // 被删范围包含当前正在改写的楼层时,工作区内容已失效,一并清掉
-    if (ui.floor != null && ui.floor >= floor) {
-      ui.floor = null;
-      ui.floorLabel = '';
-      ui.speaker = '';
-      ui.originalText = '';
-      ui.chatId = '';
-      ui.paragraphs = [];
+    if (
+      ui.floor != null &&
+      ui.floor >= floor &&
+      (!ui.chatIdentity || ui.chatIdentity === targetIdentity)
+    ) {
+      clearActiveFloorState();
     }
     refreshFloorRows();
     showToast(`已删除第 ${floor} 层及之后 ${deleted} 层`);
   } catch (error) {
+    refreshFloorRows();
     showToast(error instanceof Error ? error.message : '删除失败');
+  } finally {
+    floorActionBusy.value = false;
   }
 }
 
@@ -775,9 +804,13 @@ async function reconcileGenerationTask(expectedTaskId?: number): Promise<void> {
   generationTask.value = null;
 }
 
+let boundEventSource: STEventSource | null = null;
 let chatChangedHandler: (() => void) | null = null;
 let chatChangedEvent: unknown;
 let presetChangedEvent: unknown;
+let chatChangedTimer = 0;
+let toastTimer = 0;
+let modelMenuTimer = 0;
 const refreshHideScripts = () => {
   regexRevision.value += 1;
 };
@@ -794,11 +827,15 @@ onMounted(() => {
   currentChatIdentity.value = getOpenChatIdentity(context);
   const event = context?.eventTypes?.CHAT_CHANGED;
   const on = context?.eventSource?.on;
-  if (!event || typeof on !== 'function') return;
+  if (!event || typeof on !== 'function' || !context?.eventSource) return;
+  boundEventSource = context.eventSource;
   chatChangedEvent = event;
   chatChangedHandler = () => {
-    window.setTimeout(() => {
+    window.clearTimeout(chatChangedTimer);
+    chatChangedTimer = window.setTimeout(() => {
+      chatChangedTimer = 0;
       currentChatIdentity.value = getOpenChatIdentity();
+      if (ui.open && ui.page === 'floors') refreshFloorRows();
       refreshHideScripts();
       void reconcileGenerationTask();
     }, 0);
@@ -810,13 +847,26 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.clearTimeout(floorSearchTimer);
-  const context = getContext();
-  if (chatChangedHandler && chatChangedEvent && typeof context?.eventSource?.off === 'function') {
-    context.eventSource.off(chatChangedEvent, chatChangedHandler);
+  window.clearTimeout(chatChangedTimer);
+  window.clearTimeout(toastTimer);
+  window.clearTimeout(modelMenuTimer);
+  floorSearchTimer = 0;
+  chatChangedTimer = 0;
+  toastTimer = 0;
+  modelMenuTimer = 0;
+
+  document.removeEventListener('pointerdown', onChannelMenuDocDown, true);
+  document.removeEventListener('keydown', onChannelMenuKeydown, true);
+
+  const eventSource = boundEventSource ?? getContext()?.eventSource;
+  if (chatChangedHandler && chatChangedEvent) {
+    removeStEventListener(eventSource, chatChangedEvent, chatChangedHandler);
   }
-  if (presetChangedEvent && typeof context?.eventSource?.off === 'function') {
-    context.eventSource.off(presetChangedEvent, refreshHideScripts);
+  if (presetChangedEvent) {
+    removeStEventListener(eventSource, presetChangedEvent, refreshHideScripts);
   }
+  boundEventSource = null;
+  chatChangedHandler = null;
   generationTask.value?.controller.abort();
 });
 
@@ -829,6 +879,17 @@ async function startReview(): Promise<void> {
   if (ui.floor == null || !ui.originalText.trim()) {
     showToast('当前楼层不可用');
     return;
+  }
+  const selectedChannel =
+    (selectedChannelId.value
+      ? channels.find(channel => channel.id === selectedChannelId.value)
+      : channels[0]) ?? null;
+  if (!selectedChannel) {
+    showToast('请先在「设置 → 副 API」添加副渠道');
+    return;
+  }
+  if (selectedChannelId.value !== selectedChannel.id) {
+    selectedChannelId.value = selectedChannel.id;
   }
   contextRounds.value = Math.min(10, Math.max(0, Math.floor(Number(contextRounds.value) || 0)));
 
@@ -843,9 +904,6 @@ async function startReview(): Promise<void> {
   const floor = ui.floor;
   const originalText = ui.originalText;
   const draft = captureWorkspaceDraft();
-  const selectedChannel = selectedChannelId.value
-    ? channels.find(channel => channel.id === selectedChannelId.value) ?? null
-    : null;
   const controller = new AbortController();
   const task: GenerationTask = {
     id: ++generationSequence,
@@ -884,7 +942,7 @@ async function startReview(): Promise<void> {
       includeWorldInfo: draft.carryWorldbook,
       includeCharacterDescription: draft.carryCharDesc,
       includeUserDescription: draft.carryUserDesc,
-      channel: selectedChannel ? JSON.parse(JSON.stringify(selectedChannel)) as ApiChannel : null,
+      channel: JSON.parse(JSON.stringify(selectedChannel)) as ApiChannel,
       signal: controller.signal,
       generalInstructions,
       annotations,
@@ -1046,24 +1104,29 @@ async function saveManualEdit(): Promise<void> {
   const floor = ui.floor;
   const originalText = ui.originalText;
   const chatId = ui.chatId;
+  const chatIdentity = ui.chatIdentity;
   const hadMarks = hasInstructions.value;
   saving.value = true;
   try {
-    const result = await applyFloorText(floor, originalText, nextText, chatId);
+    const result = await applyFloorText(floor, originalText, nextText, chatId, chatIdentity);
     if (result === 'chat-changed') {
       showToast('当前聊天已经切换，不能保存修改');
       return;
     }
     if (result === 'floor-changed') {
-      showToast('楼层内容已经变化，请重新打开砚');
+      showToast('楼层内容已经变化，草稿已保留，可复制后重新打开砚');
       return;
     }
     if (result !== 'saved') {
-      showToast('无法保存当前楼层');
+      showToast('无法保存当前楼层，草稿已保留');
       return;
     }
     // 重开楼层让段落与最新内容对齐;行号可能已变,原有标注由会话重置一并清掉
-    if (ui.floor === floor && ui.chatId === chatId) {
+    if (
+      ui.floor === floor &&
+      ui.chatId === chatId &&
+      (!chatIdentity || ui.chatIdentity === chatIdentity)
+    ) {
       openFloorInPen(floor);
     }
     showToast(hadMarks ? '修改已保存，原有标注已随行号变化重置' : '修改已保存到楼层');
@@ -1152,26 +1215,42 @@ async function finishReview(): Promise<void> {
       .map(change => [change.paragraph, editedResults.value[change.paragraph] ?? change.replacement] as const),
   );
   const nextText = applyParagraphReplacements(ui.originalText, accepted);
+  const targetFloor = ui.floor;
 
+  generationError.value = '';
   saving.value = true;
   try {
-    const result = await applyFloorText(ui.floor, ui.originalText, nextText, ui.chatId);
+    const result = await applyFloorText(
+      targetFloor,
+      ui.originalText,
+      nextText,
+      ui.chatId,
+      ui.chatIdentity,
+    );
     if (result === 'chat-changed') {
-      showToast('当前聊天已经切换，不能应用结果');
+      const msg = '当前聊天已经切换，不能应用结果（审阅内容已保留）';
+      generationError.value = msg;
+      showToast(msg);
       return;
     }
     if (result === 'floor-changed') {
-      showToast('楼层内容已经变化，请重新打开砚');
+      const msg = '楼层内容已经变化，请复制需要保留的文本后重新打开砚';
+      generationError.value = msg;
+      showToast(msg);
       return;
     }
     if (result !== 'saved') {
-      showToast('无法保存当前楼层');
+      const msg = '无法保存当前楼层，审阅结果已保留供重试';
+      generationError.value = msg;
+      showToast(msg);
       return;
     }
     closePen();
-    toastr?.info?.(`改写结果已保存到楼层 #${ui.floor}`, '柏宝砚');
+    toastr?.info?.(`改写结果已保存到楼层 #${targetFloor}`, '柏宝砚');
   } catch (error) {
-    showToast(error instanceof Error ? error.message : '保存楼层失败');
+    const msg = error instanceof Error ? error.message : '保存楼层失败';
+    generationError.value = msg;
+    showToast(msg);
   } finally {
     saving.value = false;
   }
@@ -1179,7 +1258,9 @@ async function finishReview(): Promise<void> {
 
 function showToast(message: string): void {
   toastText.value = message;
-  window.setTimeout(() => {
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
+    toastTimer = 0;
     if (toastText.value === message) toastText.value = '';
   }, 2200);
 }
@@ -1226,7 +1307,9 @@ function pickModel(model: string): void {
 }
 
 function closeModelMenuSoon(): void {
-  window.setTimeout(() => {
+  window.clearTimeout(modelMenuTimer);
+  modelMenuTimer = window.setTimeout(() => {
+    modelMenuTimer = 0;
     modelMenuOpen.value = false;
     modelQuery.value = '';
   }, 150);
@@ -1258,11 +1341,17 @@ function saveChannel(): void {
     showToast('请填写渠道名');
     return;
   }
+  const { allowed, rejected } = sanitizeExcludeParams(channelDraft.value.excludeParams);
+  channelDraft.value.excludeParams = allowed;
   saveSharedChannel(channelDraft.value);
   selectedChannelId.value = channelDraft.value.id;
   rememberSelectedChannel();
   channelDraft.value = null;
-  showToast('渠道已保存');
+  if (rejected.length > 0) {
+    showToast(`渠道已保存（已忽略非模型参数：${rejected.join(', ')}）`);
+  } else {
+    showToast('渠道已保存');
+  }
 }
 
 function removeChannel(): void {
@@ -1346,9 +1435,10 @@ async function applyReplacement(result: ReplacementResult): Promise<void> {
   const floor = ui.floor;
   const originalText = ui.originalText;
   const chatId = ui.chatId;
+  const chatIdentity = ui.chatIdentity;
   replacing.value = true;
   try {
-    const applyResult = await applyFloorText(floor, originalText, result.text, chatId);
+    const applyResult = await applyFloorText(floor, originalText, result.text, chatId, chatIdentity);
     if (applyResult === 'chat-changed') {
       showToast('当前聊天已经切换，不能执行替换');
       return;
@@ -1362,7 +1452,11 @@ async function applyReplacement(result: ReplacementResult): Promise<void> {
       return;
     }
 
-    if (ui.floor === floor && ui.chatId === chatId) {
+    if (
+      ui.floor === floor &&
+      ui.chatId === chatId &&
+      (!chatIdentity || ui.chatIdentity === chatIdentity)
+    ) {
       openFloorInPen(floor);
     }
     showToast(`已替换 ${result.count} 处`);
@@ -1928,10 +2022,10 @@ function onOverlayClick(event: MouseEvent): void {
                   </button>
                   <Transition name="bby-menu">
                     <ul v-if="channelMenuOpen" class="bby-menu" role="listbox">
-                      <li>
-                        <button type="button" :class="{ 'is-active': !selectedChannelId }" @click="pickChannel('')">
-                          <Icon name="check" class="bby-menu-check" />
-                          <span class="bby-menu-name">跟随主 API</span>
+                      <li v-if="!channels.length">
+                        <button type="button" @click="goToAddChannel">
+                          <Icon name="plus" class="bby-menu-check" style="opacity: 1" />
+                          <span class="bby-menu-name">前往添加副 API 渠道</span>
                         </button>
                       </li>
                       <li v-for="channel in channels" :key="channel.id">
@@ -2087,6 +2181,7 @@ function onOverlayClick(event: MouseEvent): void {
                               class="bby-floor-action"
                               type="button"
                               :title="row.hidden ? '显示楼层' : '隐藏楼层'"
+                              :disabled="floorActionBusy"
                               @click.stop="onToggleFloorHidden(row.floor)"
                             >
                               <Icon :name="row.hidden ? 'eyeOff' : 'eye'" />
@@ -2095,6 +2190,7 @@ function onOverlayClick(event: MouseEvent): void {
                               class="bby-floor-action"
                               type="button"
                               title="删除该层及之后楼层"
+                              :disabled="floorActionBusy"
                               @click.stop="onDeleteFloor(row.floor)"
                             >
                               <Icon name="trash" />
@@ -2155,8 +2251,8 @@ function onOverlayClick(event: MouseEvent): void {
                 <Collapsible title="基本设置">
                   <label class="bby-modal-field">
                     <span class="bby-modal-label">默认渠道</span>
-                    <select v-model="penSettings.defaultChannelId" class="bby-input bby-select">
-                      <option value="">跟随主 API</option>
+                    <select v-model="penSettings.defaultChannelId" class="bby-input bby-select" :disabled="!channels.length">
+                      <option v-if="!channels.length" value="">请先在下方「副 API」添加渠道</option>
                       <option v-for="channel in channels" :key="channel.id" :value="channel.id">
                         {{ channel.name }} · {{ channel.model }}
                       </option>
@@ -2241,7 +2337,7 @@ function onOverlayClick(event: MouseEvent): void {
                     </li>
                   </ul>
                   <p v-else-if="!sharingState.ready" class="bby-field-hint">正在载入渠道…</p>
-                  <p v-else class="bby-field-hint">还没有渠道。可以添加副 API，或直接跟随主 API。</p>
+                  <p v-else class="bby-field-hint">还没有渠道。AI 标注改写需先添加副 API 渠道；手动编辑、查找替换与楼层管理无需渠道即可直接使用。</p>
                 </Collapsible>
 
                 <Collapsible title="快捷语句">
@@ -2398,6 +2494,7 @@ function onOverlayClick(event: MouseEvent): void {
         <label class="bby-modal-field">
           <span class="bby-modal-label">排除参数</span>
           <input v-model="excludeParamsText" class="bby-input" placeholder="逗号分隔，如 temperature, max_tokens" />
+          <span class="bby-field-hint">仅支持排除模型采样参数（如 temperature, top_p, max_tokens, reasoning_effort）。</span>
         </label>
         <p v-if="testMessage" class="bby-channel-test">{{ testMessage }}</p>
         <footer class="bby-modal-foot">

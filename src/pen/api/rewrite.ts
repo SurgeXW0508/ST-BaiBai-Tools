@@ -1,6 +1,5 @@
 import {
   requestCompletion,
-  requestViaMainApi,
   type ChatMessage,
 } from '@pen/api/client';
 import { CHAIN_OF_THOUGHT_PROMPT, JAILBREAK_PROMPT, resolvePrompt } from '@pen/api/prompts';
@@ -172,6 +171,10 @@ export function parseChanges(raw: string, originalText: string): RewriteChange[]
 }
 
 export async function rewriteCurrentFloor(request: RewriteRequest): Promise<RewriteResult> {
+  if (!request.channel) {
+    throw new Error('请先在「设置 → 副 API」添加并选择副渠道后再发起 AI 改写');
+  }
+  const channel = request.channel;
   const story = await collectRewriteStoryContext(
     request.floor,
     request.originalText,
@@ -242,9 +245,7 @@ export async function rewriteCurrentFloor(request: RewriteRequest): Promise<Rewr
   const chainOfThought = resolvePrompt(penSettings.prompts.chainOfThought, CHAIN_OF_THOUGHT_PROMPT);
   if (chainOfThought) messages.push({ role: 'system', content: chainOfThought });
 
-  const raw = request.channel
-    ? await requestCompletion(request.channel, messages, request.signal)
-    : await requestViaMainApi(messages, request.signal);
+  const raw = await requestCompletion(channel, messages, request.signal);
   return {
     changes: parseChanges(raw, request.originalText),
     historyMessageCount: story.historyMessageCount,
