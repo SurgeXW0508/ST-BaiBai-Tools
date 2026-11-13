@@ -866,3 +866,102 @@ test('FX-T4, FX-T5 & FX-T7: shared GENERATION_REQUEST_ID_KEY, extensionOps 60s t
     assert.equal(backingScrollTop, 420, 'Without requestAnimationFrame, scrollTop write must execute directly');
 });
 
+test('FX2-2 & FX2-3: legacy <GROUP>/<CHARIFNOTGROUP> macro gating and scrollTop interceptor failure isolation', async () => {
+    // --- FX2-2: legacy <GROUP> and <CHARIFNOTGROUP> macros stop WI prewarm and skip bulk prompt collection ---
+    const tokContext = vm.createContext({
+        URL,
+        Headers,
+        Map,
+        Set,
+        console,
+        location: new URL('http://localhost:8000/'),
+        fetch: async () => new Response(JSON.stringify({ ok: true, data: { counts: [] } }), { status: 200 }),
+    });
+    const tokenizer = await loadVmModule('../src/preset/tokenizer.js', tokContext, {
+        '@sillytavern/script': {
+            main_api: 'openai',
+            getRequestHeaders: () => ({}),
+            getCurrentChatId: () => 'chat-1',
+        },
+        '@sillytavern/scripts/openai': { oai_settings: {}, promptManager: {} },
+        '@sillytavern/scripts/tokenizers': { getTokenizerModel: () => 'gpt-4o' },
+        '@sillytavern/scripts/utils': { getStringHash: text => String(text).length },
+        './constants.js': presetConstants,
+        './saveToggle.js': { updatePromptTokenCell() {} },
+        './state.js': { LOG_PREFIX: '[test]', extensionState: {}, settings: { tokenizerBulkCountEnabled: true } },
+        './switchFast.js': {},
+        './util.js': { isPresetGenerationActive: () => false },
+        './vueList.js': { isPresetVuePromptListDragging: () => false },
+        './vueModel.js': {},
+    });
+
+    const wiCollected = tokenizer.collectOpenAITokenizerWorldInfoBudgetMessages({
+        textToScan: '',
+        entries: [
+            { content: 'plain before group', maySkip: false },
+            { content: 'Active party: <GROUP>', maySkip: false },
+            { content: 'plain after group', maySkip: false },
+        ],
+    });
+    assert.deepEqual(JSON.parse(JSON.stringify(wiCollected)), [{ role: 'system', content: 'plain before group\n' }]);
+
+    const bulkCollected = await tokenizer.collectOpenAITokenizerBulkMessages({
+        newChatContent: '[Start chat with <CHARIFNOTGROUP>]',
+        sendIfEmpty: 'Plain fallback prompt',
+        newExampleChatContent: '[Example for <group>]',
+    });
+    assert.deepEqual(JSON.parse(JSON.stringify(bulkCollected)), [{ role: 'user', content: 'Plain fallback prompt' }]);
+
+    // --- FX2-3: throwing scrollTop interceptor is isolated without breaking lower-priority interceptors or native setter ---
+    let backingScrollTop = 0;
+    const proto = {};
+    Object.defineProperty(proto, 'scrollTop', {
+        configurable: true,
+        get() { return backingScrollTop; },
+        set(val) { backingScrollTop = Number(val); },
+    });
+
+    let lowerPriorityCalls = 0;
+    let interceptInLower = false;
+    let interceptedValue = null;
+
+    scrollTopPatch.registerScrollTopWriteInterceptor(
+        'throwingGuard',
+        () => {
+            throw new Error('simulated interceptor failure');
+        },
+        { prototype: proto, priority: 5 },
+    );
+    scrollTopPatch.registerScrollTopWriteInterceptor(
+        'workingGuard',
+        (_el, val) => {
+            lowerPriorityCalls += 1;
+            if (!interceptInLower) return false;
+            interceptedValue = val;
+            return true;
+        },
+        { prototype: proto, priority: 10 },
+    );
+
+    const elem = Object.create(proto);
+    const debugCalls = [];
+    const origDebug = console.debug;
+    console.debug = (...args) => { debugCalls.push(args); };
+    try {
+        assert.doesNotThrow(() => {
+            elem.scrollTop = 180;
+        });
+        assert.equal(lowerPriorityCalls, 1, 'Lower-priority interceptor must still run after higher-priority failure');
+        assert.equal(backingScrollTop, 180, 'Original setter must still run when remaining interceptors return false');
+
+        interceptInLower = true;
+        elem.scrollTop = 360;
+        assert.equal(lowerPriorityCalls, 2);
+        assert.equal(interceptedValue, 360);
+        assert.equal(backingScrollTop, 180, 'Working lower-priority interceptor can still intercept write');
+        assert.equal(debugCalls.length, 2);
+        assert.equal(String(debugCalls[0][0]).includes('"throwingGuard"'), true);
+    } finally {
+        console.debug = origDebug;
+    }
+});
