@@ -96,7 +96,7 @@ tracking branch = origin/personal/stable
 
 完整能力归属见 [SillyTavern Personal canonical maintenance rules](https://github.com/SurgeXW0508/SillyTavern/blob/release/docs/personal-fork/MAINTENANCE_COMPATIBILITY.md)，日常维护注意以下两处运行期联动：
 
-- **扩展路由改写与更新提示**：柏宝箱前端在将 `/api/extensions/*` 请求改写到柏宝库前，会先读取后端扩展管理配置确认 `interceptEnabled` 实际开启；若未安装柏宝库或后端关闭接管，自动回退酒馆原生扩展接口。当后端版本检查不可用时，浏览器兜底更新检查读取个人 Fork `SurgeXW0508/ST-BaiBai-Tools`（`personal/stable`）的 `manifest.json`，不再读取原作者 `main` 以免产生误报。
+- **扩展路由改写与更新提示**：柏宝箱前端在将 `/api/extensions/*` 请求改写到柏宝库前，会先读取后端扩展管理配置确认 `interceptEnabled` 实际开启；若未安装柏宝库或后端关闭接管，自动回退酒馆原生扩展接口（配置接口发生非 `unsupported` 临时异常时进入 60 秒冷却期并沿用本地缓存状态，避免每次扩展操作重复等待超时）。当后端版本检查不可用时，浏览器兜底更新检查读取个人 Fork `SurgeXW0508/ST-BaiBai-Tools`（`personal/stable`）的 `manifest.json`，不再读取原作者 `main` 以免产生误报。
 - **主题懒加载耦合**：酒馆启动时的主题懒加载由“柏宝库剥离非当前主题 + 柏宝箱按需水合切换主题”共同完成。若在酒馆设置中禁用或移除柏宝箱，请完整刷新页面（柏宝库检测到柏宝箱未启用时会自动回退下发完整主题列表）。
 
 ## 7. 代码任务结束时的部署交接
