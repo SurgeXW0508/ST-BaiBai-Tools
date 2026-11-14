@@ -8,16 +8,16 @@
 
 | 项目 | 当前确认值 |
 | --- | --- |
-| NAS 宿主机目录 | `/vol3/1000/SillyTavern/extensions/ST-BaiBai-Tools` |
+| NAS 宿主机目录 | `<NAS_ST_COMPOSE_DIR>/extensions/ST-BaiBai-Tools` |
 | 容器内目录 | `/home/node/app/public/scripts/extensions/third-party/ST-BaiBai-Tools` |
-| Docker 挂载 | 宿主机 `extensions` → 容器 `public/scripts/extensions/third-party` |
+| Docker 挂载 | 宿主机 Compose 项目下 `./extensions` → 容器 `/home/node/app/public/scripts/extensions/third-party` |
 | Git origin | `https://github.com/SurgeXW0508/ST-BaiBai-Tools.git` |
 | NAS 当前分支 | `personal/stable` |
-| NAS 当前已安装 Runtime 基线 | `2f6a9c54d2c906b4a0e44d20c12d0712552e393d` |
+| 当前发布配对 Runtime/`dist` 基线 | `1e8d5a818e19c7deafee42808aa39033c25170a1`（`1.2.0`，配对 `v1.19.0-personal.2`；上一版 `personal.1` 快照为 `2f6a9c54d2c906b4a0e44d20c12d0712552e393d`） |
 | NAS 当前 tracking | `origin/personal/stable` |
-| 2026-11-12 核验时工作区 | clean |
+| 核验时工作区要求 | clean |
 
-2026-11-12 首次建立本 Runbook 时，NAS 停留在 `2f6a9c54d2c906b4a0e44d20c12d0712552e393d`；此后 GitHub `personal/stable` 已推进合入经审查的性能与归属收敛 Runtime/`dist`（如 `3314098e` / Runtime `61180ebd`），候选分支（如 `candidate/baibai-1.2.0`）亦包含新的个人 Runtime 与 `dist` 构建产物，待三库统一发布节点再由用户在扩展管理器执行更新。日常维护应实时 `git fetch` 并读取远端 HEAD 与提交差异，不要把本文中的历史快照 SHA 当作当前远端分支头。
+`personal/stable` 当前已合入经审查的 `1.2.0` 个人策略与 `dist` 构建产物（Runtime/`dist` 基线 `1e8d5a818e19c7deafee42808aa39033c25170a1`），所有历史临时候选分支均已在快进合入后清理。日常维护应实时 `git fetch` 并读取远端 HEAD 与提交差异，不要把本文中的历史快照 SHA 当作当前远端分支头。
 
 柏宝箱代码通过 Docker bind mount 从宿主机加载。更新这个 Git 目录不需要重新构建或拉取 SillyTavern Docker 镜像，也通常不需要重启 Server；更新完成后需要浏览器完整刷新，使新构建产物被加载。
 
@@ -85,7 +85,7 @@ tracking branch = origin/personal/stable
 - 进入 Docker 容器终端；
 - 在 NAS 上运行 `npm install` 或 `npm run build`（构建产物应在发布到 stable 前生成并提交）。
 
-若更新失败、工作区不干净、origin/分支不符或页面出现异常，停止继续操作并先核对 Git 状态；不要用重装扩展、删除目录或强制重置作为第一反应。
+若更新失败、提示 `LOCAL_CHANGES` / `DIVERGED` / `DETACHED_HEAD`、origin/分支不符或页面出现异常，停止继续操作并先核对 Git 状态；**切勿点击柏宝库扩展管理接管弹窗中的“强制更新”（`force`）**，也不要用重装扩展、删除目录或强制重置作为第一反应。
 
 ## 5. 回滚边界
 
@@ -96,12 +96,13 @@ tracking branch = origin/personal/stable
 
 ## 6. 与柏宝库的联动及使用边界
 
-完整能力归属见 [SillyTavern Personal canonical maintenance rules](https://github.com/SurgeXW0508/SillyTavern/blob/release/docs/personal-fork/MAINTENANCE_COMPATIBILITY.md)，日常维护与使用注意以下五处运行期边界：
+完整能力归属见 [SillyTavern Personal canonical maintenance rules](https://github.com/SurgeXW0508/SillyTavern/blob/release/docs/personal-fork/MAINTENANCE_COMPATIBILITY.md)，日常维护与使用注意以下六处运行期边界：
 
-- **扩展路由改写与更新提示**：柏宝箱前端在将 `/api/extensions/*` 请求改写到柏宝库前，会先读取后端扩展管理配置确认 `interceptEnabled` 实际开启；若未安装柏宝库或后端关闭接管，自动回退酒馆原生扩展接口（配置接口发生非 `unsupported` 临时异常时进入 60 秒冷却期并沿用本地缓存状态，避免每次扩展操作重复等待超时）。当后端版本检查不可用时，浏览器兜底更新检查读取个人 Fork `SurgeXW0508/ST-BaiBai-Tools`（`personal/stable`）的 `manifest.json`，不再读取原作者 `main` 以免产生误报。
+- **扩展路由改写与更新提示**：柏宝箱前端在将 `/api/extensions/*` 请求改写到柏宝库前，会先读取后端扩展管理配置确认 `interceptEnabled` 实际开启（柏宝库默认开启接管，故在扩展管理页点击更新实际由柏宝库权威 Git 服务执行）；若未安装柏宝库或后端关闭接管，自动回退酒馆原生扩展接口（配置接口发生非 `unsupported` 临时异常时进入 60 秒冷却期并沿用本地缓存状态，避免每次扩展操作重复等待超时）。当后端版本检查不可用时，浏览器兜底更新检查读取个人 Fork `SurgeXW0508/ST-BaiBai-Tools`（`personal/stable`）的 `manifest.json`，不再读取原作者 `main` 以免产生误报。
 - **柏宝库早期桥接水合与单一闭包绑定 `fetchPipeline`**：启动时从 `window.__baibaokuEarlyBridge` 同步水合柏宝库权威开关（含 `fastCharacterListEnabled`、`tokenizerBulkCountEnabled` 等），并将柏宝库归属字段从前端 `extension_settings.baiBaiToolkit` 持久化中剥离以防陈旧配置闪烁；原死代码 `fastBootstrap.js` 已物理删除，`chatKeyboardScanReductionEnabled` 仅保留锁定禁用的退役 UI 桩位以待后续与面板模板协同移除。前端全部 11 处固定功能 `fetch` 钩子、动态 `presetSaveToggle:*` 槽位与柏宝砚按需挂载的 `chatSaveObserver` 统一收敛至单一固定拓扑优先级管线 `src/features/fetchPipeline.js`（明文 JSON 观察槽恒在外层、保存 Gzip 与快表路由恒在内层）：调度器在首次挂载时闭包绑定底层 `nextBelowFetch` 而不向 `globalThis.fetch` 反向查询，既能在位于栈顶且槽位归零（`1 -> 0`）时还原底层 `fetch`，也能在其他未打标第三方扩展后置包装 `window.fetch` 时安全共存（保留外层扩展包装、空槽零开销直通、重开槽位原地恢复而不产生递归环）；`themeCacheSync` 在关闭主题懒加载或设置页加速时自动卸载并清空 `baibaokuThemePageCache`，而 `presetAutoBackup` 因同时提供 OpenAI 预设保存脏状态门控（`markPresetCleanFromSavedData`）保持常驻观察并在关闭自动备份时跳过 IndexedDB 落库；保存请求 Gzip 仅在压缩前异常或服务端明确返回 HTTP `400`/`415` 时回退未压缩重试，不对 `5xx` 或已发出后的网络中断重复投递。
 - **主题懒加载耦合**：酒馆启动时的主题懒加载由“柏宝库剥离非当前主题 + 柏宝箱按需水合切换主题”共同完成。若在酒馆设置中禁用或移除柏宝箱，请完整刷新页面（柏宝库通过扩展目录 `mtimeMs` 与 30 秒 TTL 校验检测到柏宝箱未启用或已卸载时，会自动回退下发完整主题列表）。
 - **Tokenizer 宏门控与滚动补丁隔离**：与柏宝库配对的 Tokenizer 预热宏跳过规则统一覆盖 `{{...}}` 与旧式 `<USER>/<BOT>/<CHAR>/<CHARIFNOTGROUP>/<GROUP>`（`FX2-2`），单一 `scrollTop` 写入注册表对各拦截器单独做异常隔离（`FX2-3`），详细归属见上述 ST canonical 规范。
+- **默认开启的上游体验项说明**：「减少加载楼层」默认开启并将 `power_user.chat_truncation` 同步为 `10`（仅限制首屏 DOM 渲染楼层，上滑仍可正常加载全部历史楼层，不删改聊天数据；如需改回自定义条数可在柏宝箱面板关闭该开关）；预设备份自动清理默认保留所有预设合计最新的 `200` 份无备注备份（添加了备注的备份永久豁免清理，重要快照建议随手添加备注）。
 - **内置柏宝砚（新版楼层管理器）使用与安全边界**：个人版已移除「跟随主 API」（`generateRaw`）改写路径，AI 标注改写须显式配置独立副 API 渠道（避免重叠请求污染酒馆全局 `max_tokens` 单例或将内置破限词发往 Google Vertex 生产账号），而手动编辑、查找替换、楼层筛选/跳转/隐藏/删除及楼层截图无需配置任何渠道即可直接使用。副渠道请求强制校验纯净 `http(s)://` 地址（拒绝内嵌凭据、查询参数与片段并自动剥离尾部 `/chat/completions` 或 `/models`）、识别非流式 HTTP 200 `{ error }` 错误信封及流式 SSE 尾行/JSON 回退，并采用采样参数白名单（`EXCLUDABLE_MODEL_PARAMS`）+ 固定凭据信封两阶段构造，禁止 `excludeParams` 删除 `custom_include_headers`、`reverse_proxy`、`proxy_password` 等路由认证字段，防止串用酒馆保存的 Custom / OpenAI 主密钥；共享渠道仓（`baibai_api_channels`）按消费者建仓协议初始化（空列表不写占位仓，兼容合并 `baibai_book` 与 `baibai_image` 旧渠道），其 API Key 明文保存在 `extension_settings` 中（会同步落入同用户目录的 `settings.json`、设置自动备份与柏宝库 `baibaoku/cache`，日常建议使用低权限或独立限额 Key，导出分享前先清理密钥）。手改、AI 审阅应用与查找替换均禁止空楼层保存、共用变更互斥锁，并绑定 `BoundChatTarget`（单聊强校验 `avatar_url + file_name` 与 `chat` 数组引用、群聊强校验 `id`，按需动态挂载观察槽并在 `stopPen()` 强制卸载）核验真实落盘及酒馆 `saveChatConditional` 布尔返回——等待锁或 `MESSAGE_EDITED` 等异步回调期间若切换至同名 `main` 等其他会话，绝不误认他人落盘成功或污染新会话 DOM/编辑态，失败时回滚内存文本/swipe 并完整保留草稿供重试（按上游设计不触发 `runOnEdit` 正则）；执行楼层隐藏/删除前会拦截酒馆原生 `#curEditTextarea` 未保存修改，楼层删除连带纳入前置 `tool_invocations` 载体系统层并固定以 `/del toolcalls=false <count>` 执行（落盘 HTTP 失败时仅在仍处原目标会话时调用 `reloadCurrentChat` 对齐，且自动清理命中已删楼层的后台改写任务）；世界书干跑（`checkWorldInfo(..., isDryRun=true)`）在聊天流式生成期间自动跳过，按最新楼层 `depth 0` 逆序扫描，优先读取 `baibai_exclude_settings`，不在调用前预写空占位槽并在同聊天非流式态下安全还原 `extensionPrompts['2_floating_prompt']`；若同时安装并启用独立版 `ST-BaiBai-Pen` / `ST-BaiBai-Inkwell`，内置版会自动让出并完整回收 Shadow Host、轮询定时器与运行态。
 
 ## 7. 大阶段收口时的部署交接
