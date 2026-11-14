@@ -194,34 +194,34 @@ export async function toggleFloorHidden(floor: number): Promise<boolean> {
   const willHide = !message.is_system;
 
   let slashInvoked = false;
-  let result: Awaited<ReturnType<SlashRunner>>;
+  let slashReportedError = false;
   try {
-    const outcome = await runWithObservedChatSave(
+    await runWithObservedChatSave(
       {
         target,
         requireHttpSave: expectsHttpChatPersistence(context),
       },
-      () => {
+      async () => {
         slashInvoked = true;
-        return run(willHide ? `/hide ${floor}` : `/unhide ${floor}`, {
+        const slashResult = await run(willHide ? `/hide ${floor}` : `/unhide ${floor}`, {
           handleExecutionErrors: true,
           source: SLASH_SOURCE,
         });
+        if (slashResult?.isError) {
+          slashReportedError = true;
+          throw new Error(slashResult.errorMessage || '斜杠命令执行失败');
+        }
+        return slashResult;
       },
     );
-    result = outcome.value;
   } catch (error) {
-    if (slashInvoked) {
+    if (slashInvoked && !slashReportedError) {
       const recoveryContext = getContext() ?? context;
       if (isTargetStillActive(target, recoveryContext)) {
         await recoveryContext.reloadCurrentChat?.().catch(() => {});
       }
     }
     throw error;
-  }
-
-  if (result?.isError) {
-    throw new Error(result.errorMessage || '斜杠命令执行失败');
   }
 
   const postContext = getContext() ?? context;
@@ -283,34 +283,34 @@ export async function deleteFloorsFrom(floor: number): Promise<DeleteFloorsResul
       prepareNativeEditorsBeforeSlashAction(liveContext, 'any');
 
       let slashInvoked = false;
-      let result: Awaited<ReturnType<SlashRunner>>;
+      let slashReportedError = false;
       try {
-        const outcome = await runWithObservedChatSave(
+        await runWithObservedChatSave(
           {
             target: snapshot.target,
             requireHttpSave: expectsHttpChatPersistence(liveContext),
           },
-          () => {
+          async () => {
             slashInvoked = true;
-            return run(`/del toolcalls=false ${snapshot.deleteCount}`, {
+            const slashResult = await run(`/del toolcalls=false ${snapshot.deleteCount}`, {
               handleExecutionErrors: true,
               source: SLASH_SOURCE,
             });
+            if (slashResult?.isError) {
+              slashReportedError = true;
+              throw new Error(slashResult.errorMessage || '斜杠删除命令执行失败');
+            }
+            return slashResult;
           },
         );
-        result = outcome.value;
       } catch (error) {
-        if (slashInvoked) {
+        if (slashInvoked && !slashReportedError) {
           const recoveryContext = getContext() ?? liveContext;
           if (isTargetStillActive(snapshot.target, recoveryContext)) {
             await recoveryContext.reloadCurrentChat?.().catch(() => {});
           }
         }
         throw error;
-      }
-
-      if (result?.isError) {
-        throw new Error(result.errorMessage || '斜杠删除命令执行失败');
       }
 
       const postContext = getContext() ?? liveContext;

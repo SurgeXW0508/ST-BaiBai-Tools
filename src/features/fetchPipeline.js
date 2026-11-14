@@ -35,47 +35,6 @@ function resolveSlotPriority(slotId) {
     throw new Error(`Unknown fetch pipeline slot: ${slotId}`);
 }
 
-function isFetchWrapperInChain(root, target) {
-    if (typeof root !== 'function' || typeof target !== 'function') {
-        return false;
-    }
-    const visited = new Set();
-    let cursor = root;
-    while (typeof cursor === 'function' && !visited.has(cursor)) {
-        if (cursor === target) {
-            return true;
-        }
-        visited.add(cursor);
-        cursor = cursor.__baiBaiToolkitOriginalFetch;
-    }
-    return false;
-}
-
-function spliceFetchWrapperOut(wrappedFetch, rawOriginalFetch) {
-    if (typeof wrappedFetch !== 'function' || typeof rawOriginalFetch !== 'function') {
-        return false;
-    }
-    if (globalThis.fetch === wrappedFetch) {
-        globalThis.fetch = rawOriginalFetch;
-        return true;
-    }
-    const visited = new Set();
-    let cursor = globalThis.fetch;
-    while (typeof cursor === 'function' && !visited.has(cursor)) {
-        visited.add(cursor);
-        if (cursor.__baiBaiToolkitOriginalFetch === wrappedFetch) {
-            cursor.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
-            if (cursor.__baiBaiToolkitHookState && typeof cursor.__baiBaiToolkitHookState === 'object') {
-                cursor.__baiBaiToolkitHookState.rawOriginalFetch = rawOriginalFetch;
-                cursor.__baiBaiToolkitHookState.originalFetch = rawOriginalFetch.bind(globalThis);
-            }
-            return true;
-        }
-        cursor = cursor.__baiBaiToolkitOriginalFetch;
-    }
-    return false;
-}
-
 function getFetchPipelineState() {
     const existing = globalThis[FETCH_PIPELINE_KEY];
     if (existing && typeof existing === 'object' && existing.slots instanceof Map) {
@@ -87,8 +46,7 @@ function getFetchPipelineState() {
         sortedEntries: [],
         registrationSeq: 0,
         dispatcherFetch: null,
-        rawOriginalFetch: null,
-        originalFetch: null,
+        pinnedAboveFetch: null,
     };
     globalThis[FETCH_PIPELINE_KEY] = state;
     return state;
@@ -103,64 +61,89 @@ function rebuildSortedEntries(state) {
     });
 }
 
-function resolveUnderlyingFetch(state) {
-    const candidate = state.dispatcherFetch?.__baiBaiToolkitOriginalFetch || state.rawOriginalFetch;
-    if (typeof candidate === 'function') {
-        return candidate;
+function invokePromiseSafe(fn, thisArg, input, init) {
+    if (typeof fn !== 'function') {
+        return Promise.reject(new TypeError('globalThis.fetch is not a function'));
     }
-    return typeof globalThis.fetch === 'function' ? globalThis.fetch : null;
+    try {
+        return Promise.resolve(fn.call(thisArg, input, init));
+    } catch (syncError) {
+        return Promise.reject(syncError);
+    }
 }
 
-function dispatchFetchPipeline(state, thisArg, input, init) {
+function dispatchFetchPipeline(state, thisArg, input, init, capturedUnderlyingFetch) {
     const entries = state.sortedEntries;
     const invokeTarget = thisArg ?? globalThis;
 
     const invokeAt = (index, currentInput, currentInit) => {
         if (index >= entries.length) {
-            const underlying = resolveUnderlyingFetch(state);
-            if (typeof underlying !== 'function') {
-                return Promise.reject(new TypeError('globalThis.fetch is not a function'));
-            }
-            return underlying.call(invokeTarget, currentInput, currentInit);
+            return invokePromiseSafe(capturedUnderlyingFetch, invokeTarget, currentInput, currentInit);
         }
 
         const entry = entries[index];
-        let nextCalled = false;
-        const nextFetch = (nextInput, nextInit) => {
-            if (nextCalled) {
-                return invokeAt(index + 1, nextInput, nextInit);
-            }
-            nextCalled = true;
-            return invokeAt(index + 1, nextInput, nextInit);
-        };
+        const nextFetch = (nextInput, nextInit) => invokeAt(index + 1, nextInput, nextInit);
 
-        return entry.handler(currentInput, currentInit, nextFetch, invokeTarget);
+        try {
+            return Promise.resolve(entry.handler(currentInput, currentInit, nextFetch, invokeTarget));
+        } catch (syncError) {
+            return Promise.reject(syncError);
+        }
     };
 
     return invokeAt(0, input, init);
 }
 
-function ensureDispatcherMounted(state) {
+function createDispatcher(state, capturedUnderlyingFetch) {
+    const dispatcherFetch = function baiBaiToolkitFetchDispatcher(input, init) {
+        if (dispatcherFetch.__baiBaiToolkitRetired) {
+            return invokePromiseSafe(capturedUnderlyingFetch, this ?? globalThis, input, init);
+        }
+        return dispatchFetchPipeline(state, this, input, init, capturedUnderlyingFetch);
+    };
+
+    dispatcherFetch.__baiBaiToolkitFetchDispatcher = true;
+    dispatcherFetch.__baiBaiToolkitUnderlyingFetch = capturedUnderlyingFetch;
+    dispatcherFetch.__baiBaiToolkitRetired = false;
+    return dispatcherFetch;
+}
+
+function isActiveDispatcherReachable(state) {
+    const activeDispatcher = state?.dispatcherFetch;
+    if (typeof activeDispatcher !== 'function' || activeDispatcher.__baiBaiToolkitRetired) {
+        return false;
+    }
+    if (typeof globalThis.fetch !== 'function') {
+        return false;
+    }
+    return globalThis.fetch !== activeDispatcher.__baiBaiToolkitUnderlyingFetch;
+}
+
+function ensureDispatcherMounted(state, wasEmpty) {
     if (typeof globalThis.fetch !== 'function') {
         return false;
     }
 
-    if (state.dispatcherFetch && isFetchWrapperInChain(globalThis.fetch, state.dispatcherFetch)) {
-        return true;
+    const activeDispatcher = state.dispatcherFetch;
+    if (typeof activeDispatcher === 'function' && !activeDispatcher.__baiBaiToolkitRetired) {
+        const underlying = activeDispatcher.__baiBaiToolkitUnderlyingFetch;
+        if (
+            globalThis.fetch === activeDispatcher
+            || (!wasEmpty && globalThis.fetch !== underlying)
+            || (wasEmpty && state.pinnedAboveFetch && globalThis.fetch === state.pinnedAboveFetch)
+        ) {
+            return true;
+        }
+
+        activeDispatcher.__baiBaiToolkitRetired = true;
+        state.dispatcherFetch = null;
+        state.pinnedAboveFetch = null;
     }
 
-    const rawOriginalFetch = globalThis.fetch;
-    const dispatcherFetch = function baiBaiToolkitFetchDispatcher(input, init) {
-        return dispatchFetchPipeline(state, this, input, init);
-    };
-
-    dispatcherFetch.__baiBaiToolkitFetchDispatcher = true;
-    dispatcherFetch.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
-    dispatcherFetch.__baiBaiToolkitHookState = state;
-
-    state.rawOriginalFetch = rawOriginalFetch;
-    state.originalFetch = rawOriginalFetch.bind(globalThis);
+    const capturedUnderlyingFetch = globalThis.fetch;
+    const dispatcherFetch = createDispatcher(state, capturedUnderlyingFetch);
     state.dispatcherFetch = dispatcherFetch;
+    state.pinnedAboveFetch = null;
     globalThis.fetch = dispatcherFetch;
     return true;
 }
@@ -170,14 +153,17 @@ function unmountDispatcherIfEmpty(state) {
         return false;
     }
 
-    const underlying = state.dispatcherFetch.__baiBaiToolkitOriginalFetch || state.rawOriginalFetch;
-    const spliced = spliceFetchWrapperOut(state.dispatcherFetch, underlying);
-    if (spliced || !isFetchWrapperInChain(globalThis.fetch, state.dispatcherFetch)) {
+    const activeDispatcher = state.dispatcherFetch;
+    if (globalThis.fetch === activeDispatcher) {
+        globalThis.fetch = activeDispatcher.__baiBaiToolkitUnderlyingFetch;
+        activeDispatcher.__baiBaiToolkitRetired = true;
         state.dispatcherFetch = null;
-        state.rawOriginalFetch = null;
-        state.originalFetch = null;
+        state.pinnedAboveFetch = null;
+        return true;
     }
-    return spliced;
+
+    state.pinnedAboveFetch = typeof globalThis.fetch === 'function' ? globalThis.fetch : null;
+    return false;
 }
 
 function registerFetchPipelineSlot(slotId, handler) {
@@ -190,6 +176,7 @@ function registerFetchPipelineSlot(slotId, handler) {
     }
 
     const state = getFetchPipelineState();
+    const wasEmpty = state.slots.size === 0;
     const existingEntry = state.slots.get(slotId);
     if (existingEntry) {
         existingEntry.handler = handler;
@@ -202,7 +189,7 @@ function registerFetchPipelineSlot(slotId, handler) {
         });
     }
     rebuildSortedEntries(state);
-    return ensureDispatcherMounted(state);
+    return ensureDispatcherMounted(state, wasEmpty);
 }
 
 function unregisterFetchPipelineSlot(slotId) {
@@ -227,7 +214,7 @@ function hasFetchPipelineSlot(slotId) {
     if (!state || !(state.slots instanceof Map) || !state.slots.has(slotId)) {
         return false;
     }
-    return Boolean(state.dispatcherFetch && isFetchWrapperInChain(globalThis.fetch, state.dispatcherFetch));
+    return isActiveDispatcherReachable(state);
 }
 
 function getActiveFetchPipelineSlots() {
@@ -240,14 +227,11 @@ function getActiveFetchPipelineSlots() {
 
 function callUnderlyingFetch(input, init, thisArg = globalThis) {
     const state = globalThis[FETCH_PIPELINE_KEY];
-    const underlying = state && state.dispatcherFetch && isFetchWrapperInChain(globalThis.fetch, state.dispatcherFetch)
-        ? resolveUnderlyingFetch(state)
+    const underlying = isActiveDispatcherReachable(state)
+        ? state.dispatcherFetch.__baiBaiToolkitUnderlyingFetch
         : (typeof globalThis.fetch === 'function' ? globalThis.fetch : null);
 
-    if (typeof underlying !== 'function') {
-        return Promise.reject(new TypeError('globalThis.fetch is not a function'));
-    }
-    return underlying.call(thisArg ?? globalThis, input, init);
+    return invokePromiseSafe(underlying, thisArg ?? globalThis, input, init);
 }
 
 function resetFetchPipeline() {
@@ -257,7 +241,13 @@ function resetFetchPipeline() {
     }
     state.slots.clear();
     state.sortedEntries = [];
-    return unmountDispatcherIfEmpty(state);
+    const unmounted = unmountDispatcherIfEmpty(state);
+    if (state.dispatcherFetch) {
+        state.dispatcherFetch.__baiBaiToolkitRetired = true;
+        state.dispatcherFetch = null;
+    }
+    state.pinnedAboveFetch = null;
+    return unmounted;
 }
 
 export {
@@ -266,9 +256,7 @@ export {
     callUnderlyingFetch,
     getActiveFetchPipelineSlots,
     hasFetchPipelineSlot,
-    isFetchWrapperInChain,
     registerFetchPipelineSlot,
     resetFetchPipeline,
-    spliceFetchWrapperOut,
     unregisterFetchPipelineSlot,
 };

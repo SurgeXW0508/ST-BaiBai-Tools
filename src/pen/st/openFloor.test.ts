@@ -1,7 +1,27 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { teardownChatSaveObserver } from '@pen/st/chatPersistence';
 import { applyFloorText, getFloorSourceText, openFloorInPen } from '@pen/st/openFloor';
 import { ui } from '@pen/state/ui';
+import { resetFetchPipeline } from '../../features/fetchPipeline.js';
+
+function createHttpSaveChatMock(
+  chatId = 'chat-a',
+  sideEffect?: () => void | Promise<void>,
+  avatarUrl?: string,
+) {
+  return vi.fn(async () => {
+    await sideEffect?.();
+    await fetch('/api/chats/save', {
+      method: 'POST',
+      body: JSON.stringify({
+        ...(avatarUrl ? { avatar_url: avatarUrl } : {}),
+        file_name: chatId,
+        chat: [],
+      }),
+    });
+  });
+}
 
 function installContext(context: Record<string, unknown>): void {
   vi.stubGlobal('window', {
@@ -14,7 +34,16 @@ function installContext(context: Record<string, unknown>): void {
   });
 }
 
+beforeEach(() => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => new Response('{"ok":true}', { status: 200 })),
+  );
+});
+
 afterEach(() => {
+  teardownChatSaveObserver();
+  resetFetchPipeline();
   vi.unstubAllGlobals();
 });
 
@@ -85,7 +114,7 @@ describe('floor access without rendered messages', () => {
         getContext: () => ({
           chat,
           getCurrentChatId: () => 'chat-a',
-          saveChat: vi.fn(async () => undefined),
+          saveChat: createHttpSaveChatMock('chat-a'),
         }),
       },
     });
@@ -106,7 +135,7 @@ describe('floor access without rendered messages', () => {
     const emit = vi.fn(async (event: string) => {
       actions.push(event);
     });
-    const saveChat = vi.fn(async () => {
+    const saveChat = createHttpSaveChatMock('chat-a', () => {
       actions.push('save');
     });
     const updateMessageBlock = vi.fn(() => {
@@ -182,7 +211,7 @@ describe('floor access without rendered messages', () => {
     installContext({
       chat: [message],
       getCurrentChatId: () => 'chat-a',
-      saveChat: vi.fn(async () => {
+      saveChat: createHttpSaveChatMock('chat-a', () => {
         actions.push('save');
       }),
       updateMessageBlock,
@@ -236,7 +265,7 @@ describe('floor access without rendered messages', () => {
     installContext({
       chat: [message],
       getCurrentChatId: () => 'chat-a',
-      saveChat: vi.fn(async () => undefined),
+      saveChat: createHttpSaveChatMock('chat-a'),
       updateMessageBlock,
     });
     vi.stubGlobal('document', {
@@ -259,7 +288,7 @@ describe('floor access without rendered messages', () => {
     installContext({
       chat: [message],
       getCurrentChatId: () => 'chat-a',
-      saveChat: vi.fn(async () => undefined),
+      saveChat: createHttpSaveChatMock('chat-a'),
     });
 
     await expect(applyFloorText(0, '原文', '新正文', 'chat-a')).resolves.toBe('saved');
@@ -278,7 +307,7 @@ describe('floor access without rendered messages', () => {
     installContext({
       chat: [message],
       getCurrentChatId: () => 'chat-a',
-      saveChat: vi.fn(async () => {
+      saveChat: createHttpSaveChatMock('chat-a', () => {
         actions.push('save');
       }),
       reloadCurrentChat: vi.fn(async () => {
@@ -698,8 +727,39 @@ describe('floor access without rendered messages', () => {
 
     await expect(
       applyFloorText(0, '原文', '新正文', 'chat-a', 'character:alice.png\u0000chat-a'),
-    ).resolves.toBe('chat-changed');
+    ).rejects.toThrow('聊天保存未完成');
     expect(messageA.mes).toBe('原文');
+    expect(updateMessageBlock).not.toHaveBeenCalled();
+
+    // 若原会话在切走前已完成 HTTP 落盘，则应返回 'saved' 且绝不刷新新会话 DOM
+    activeContext = {
+      chat: [messageA],
+      characterId: 0,
+      characters: [
+        { name: 'Alice', avatar: 'alice.png', chat: 'chat-a' },
+        { name: 'Bob', avatar: 'bob.png', chat: 'chat-b' },
+      ],
+      getCurrentChatId: () => 'chat-a',
+      updateMessageBlock,
+      saveChat: createHttpSaveChatMock(
+        'chat-a',
+        () => {
+          activeContext = {
+            ...activeContext,
+            chat: [messageB],
+            characterId: 1,
+            getCurrentChatId: () => 'chat-b',
+          };
+        },
+        'alice.png',
+      ),
+    };
+
+    await expect(
+      applyFloorText(0, '原文', '新正文', 'chat-a', 'character:alice.png\u0000chat-a'),
+    ).resolves.toBe('saved');
+    expect(messageA.mes).toBe('新正文');
+    expect(messageB.mes).toBe('另一角色同文件名');
     expect(updateMessageBlock).not.toHaveBeenCalled();
   });
 });

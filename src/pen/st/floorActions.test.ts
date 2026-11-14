@@ -389,4 +389,54 @@ describe('deleteFloorsFrom', () => {
     expect(reloadA).not.toHaveBeenCalled();
     expect(reloadB).not.toHaveBeenCalled();
   });
+
+  it('fails closed when context.saveChat is a bound/anonymous function and /hide or /del triggers no HTTP save, while preserving explicit slash isError messages', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('{"ok":true}', { status: 200 })),
+    );
+    const boundSaveChat = (async () => undefined).bind(null);
+    const reload = vi.fn(async () => undefined);
+    const chat = [
+      { name: 'Alice', is_user: false, is_system: false, mes: '第0层' },
+      { name: 'Alice', is_user: false, is_system: false, mes: '第1层' },
+    ];
+
+    // 1. /hide 返回成功但未触发 HTTP 落盘（如 saveChatConditional 等待锁超时）：即便 saveChat.name 为 "bound ..." 也必须 fail-closed
+    installContext({
+      chat,
+      characterId: 0,
+      characters: [{ name: 'Alice', avatar: 'alice.png', chat: 'chat-a' }],
+      getCurrentChatId: () => 'chat-a',
+      saveChat: boundSaveChat,
+      reloadCurrentChat: reload,
+      executeSlashCommandsWithOptions: vi.fn(async () => {
+        chat[0]!.is_system = true;
+        return undefined;
+      }),
+    });
+
+    await expect(toggleFloorHidden(0)).rejects.toThrow('等待保存锁超时或未触发落盘请求');
+    expect(reload).toHaveBeenCalledOnce();
+
+    // 2. /del 返回明确 isError 时，即使未触发 HTTP 落盘，也必须保留具体斜杠报错且不误触发 reloadCurrentChat
+    reload.mockClear();
+    installContext({
+      chat,
+      characterId: 0,
+      characters: [{ name: 'Alice', avatar: 'alice.png', chat: 'chat-a' }],
+      getCurrentChatId: () => 'chat-a',
+      saveChat: boundSaveChat,
+      reloadCurrentChat: reload,
+      POPUP_TYPE: { CONFIRM: 'confirm' },
+      callGenericPopup: vi.fn(async () => true),
+      executeSlashCommandsWithOptions: vi.fn(async () => ({
+        isError: true,
+        errorMessage: '模拟斜杠删除语法或权限错误',
+      })),
+    });
+
+    await expect(deleteFloorsFrom(1)).rejects.toThrow('模拟斜杠删除语法或权限错误');
+    expect(reload).not.toHaveBeenCalled();
+  });
 });

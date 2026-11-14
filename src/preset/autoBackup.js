@@ -1,6 +1,6 @@
 import { event_types, eventSource, getRequestHeaders } from '@sillytavern/script';
 import { oai_settings } from '@sillytavern/scripts/openai';
-import { callUnderlyingFetch, hasFetchPipelineSlot, registerFetchPipelineSlot, unregisterFetchPipelineSlot } from '../features/fetchPipeline.js';
+import { callUnderlyingFetch, hasFetchPipelineSlot, registerFetchPipelineSlot } from '../features/fetchPipeline.js';
 import { schedulePresetBackupCleanup } from './backupRetention.js';
 import { PRESET_AUTO_BACKUP_FETCH_KEY, PRESET_AUTO_BACKUP_RENAME_HANDLER_KEY, PRESET_BACKUP_SAVE_URL, PRESET_RENAME_SAVE_GATE_TIMEOUT_MS, PRESET_SAVE_URL } from './constants.js';
 import { clearPendingPresetPromptChangesForSavedRevision, getPresetPromptSaveRevision } from './pendingChanges.js';
@@ -82,12 +82,6 @@ function installPresetAutoBackupFetchHook() {
 
     globalThis[PRESET_AUTO_BACKUP_FETCH_KEY] = state;
     return state;
-}
-
-function disablePresetAutoBackupFetchHook() {
-    const removed = unregisterFetchPipelineSlot('presetAutoBackup');
-    delete globalThis[PRESET_AUTO_BACKUP_FETCH_KEY];
-    return removed;
 }
 
 function skipNextPresetAutoBackup() {
@@ -457,7 +451,6 @@ export {
     capturePresetRenameBackupBodySync,
     finishOpenAiPresetRenameSaveGateAfterFinalSave,
     flushPresetRenameBackup,
-    disablePresetAutoBackupFetchHook,
     getActiveOpenAiPresetSaveRequests,
     getOpenAiPresetRenameFallbackName,
     getOpenAiPresetRenameSaveGate,

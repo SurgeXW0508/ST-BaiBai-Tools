@@ -380,15 +380,8 @@ export function teardownChatSaveObserver(): void {
   unregisterFetchPipelineSlot(CHAT_SAVE_OBSERVER_SLOT);
 }
 
-const HOST_SAVE_FUNCTION_NAMES = new Set([
-  'saveChatConditional',
-  'saveChat',
-  'saveGroupChat',
-]);
-
 export function expectsHttpChatPersistence(context: STContext | null): boolean {
-  const fnName = context?.saveChat?.name ?? '';
-  return HOST_SAVE_FUNCTION_NAMES.has(fnName);
+  return typeof context?.saveChat === 'function';
 }
 
 export function assertChatPersistable(

@@ -1433,14 +1433,22 @@ test('WP-4 retired dead modules, True Feature Off fetch-hook splicing, gzip 400/
     for (const removedSymbol of ['FAST_SETTINGS_BOOTSTRAP_FETCH_KEY', 'FAST_CHARACTER_LIST_FETCH_KEY', 'fetchFastCharacterChatList', 'fastBootstrap']) {
         assert.equal(entrySrc.includes(removedSymbol), false, `src/index.js must not reference ${removedSymbol}`);
         assert.equal(constantsSrc.includes(removedSymbol), false, `src/features/constants.js must not define ${removedSymbol}`);
-        assert.equal(distBundle.includes(removedSymbol), false, `dist/index.js must not bundle ${removedSymbol}`);
+    }
+    for (const removedDistLiteral of [
+        '__baiBaiToolkitFastSettingsBootstrapFetchPatched',
+        '__baiBaiToolkitFastCharacterListFetchPatched',
+        '/api/plugins/baibaoku/v1/chats/save-generate/discard',
+        '__baiBaiToolkitSaveGenerateFetchPatched',
+        'x-baibaoku-save-generate-status',
+        'bai-bai-save-generate-display',
+    ]) {
+        assert.equal(distBundle.includes(removedDistLiteral), false, `dist/index.js must not bundle literal ${removedDistLiteral}`);
     }
     assert.match(
         settingsHtml,
         /id="bai_bai_toolkit_chat_keyboard_scan_reduction_enabled"[\s\S]*?disabled[\s\S]*?减少酒馆键盘扫描（Personal Stable 已禁用）/,
         'src/settings.html must lock retired keyboard scan toggle as disabled in Personal Stable',
     );
-    assert.equal(distBundle.includes('BAIBAOKU_SAVE_GENERATE_DISCARD_URL'), false, 'Save Generate must remain un-bundled in dist/index.js');
 
     // 2. state.js boot hydration from __baibaokuEarlyBridge & baibaokuOwnedSettingKeys persistence strip
     {
@@ -1474,7 +1482,11 @@ test('WP-4 retired dead modules, True Feature Off fetch-hook splicing, gzip 400/
         const stateMod = await loadVmModule('../src/features/state.js', stateCtx, {
             '@sillytavern/script': { saveSettingsDebounced: () => { saveCount += 1; } },
             '@sillytavern/scripts/extensions': { extension_settings: extSettings },
-            './constants.js': { EXTENSION_KEY: 'bai-bai-toolkit', SETTINGS_KEY: 'baiBaiToolkit' },
+            './constants.js': {
+                BAIBAOKU_EARLY_BRIDGE_KEY: '__baibaokuEarlyBridge',
+                EXTENSION_KEY: 'bai-bai-toolkit',
+                SETTINGS_KEY: 'baiBaiToolkit',
+            },
         });
         stateMod.initializeSettings();
         assert.equal(stateMod.settings.chatKeyboardScanReductionEnabled, false, 'chatKeyboardScanReductionEnabled must stay forced false');
@@ -1506,7 +1518,7 @@ test('WP-4 retired dead modules, True Feature Off fetch-hook splicing, gzip 400/
         }
     }
 
-    // 3. gzipHook.js True Feature Off splicing + HTTP 400/415-only uncompressed retry
+    // 3. gzipHook.js + fetchPipeline untagged foreign wrapper coexistence + sync-throw Promise safety + HTTP 400/415-only uncompressed retry
     {
         const calls = [];
         let nextBehavior = () => new Response(JSON.stringify({ ok: true }), { status: 200 });
@@ -1536,6 +1548,7 @@ test('WP-4 retired dead modules, True Feature Off fetch-hook splicing, gzip 400/
         gzipCtx.globalThis = gzipCtx;
         gzipCtx.window = gzipCtx;
 
+        const pipelineMod = await loadVmModule('../src/features/fetchPipeline.js', gzipCtx);
         const gzipMod = await loadVmModule('../src/features/gzipHook.js', gzipCtx, {
             './constants.js': {
                 LOG_PREFIX: '[test]',
@@ -1559,22 +1572,48 @@ test('WP-4 retired dead modules, True Feature Off fetch-hook splicing, gzip 400/
         const installedGzipFetch = gzipCtx.fetch;
         assert.notEqual(installedGzipFetch, baseFetch, 'Enabled gzipHook must wrap globalThis.fetch');
 
-        // Stacked outer wrapper -> disabling gzipHook splices out from middle cleanly
-        const outerState = { rawOriginalFetch: installedGzipFetch };
-        const outerWrapper = function (...args) {
-            return outerWrapper.__baiBaiToolkitOriginalFetch.apply(this, args);
+        // Untagged third-party wrapper above dispatcher -> toggling off/on/off & registering another slot MUST NOT recurse or double-run
+        let foreignCalls = 0;
+        const untaggedForeignWrapper = function (...args) {
+            foreignCalls += 1;
+            return installedGzipFetch.apply(this, args);
         };
-        outerWrapper.__baiBaiToolkitOriginalFetch = installedGzipFetch;
-        outerWrapper.__baiBaiToolkitHookState = outerState;
-        gzipCtx.fetch = outerWrapper;
+        gzipCtx.fetch = untaggedForeignWrapper;
 
         gzipSettings.saveRequestGzipEnabled = false;
         gzipMod.syncSaveRequestGzipFetchHook();
-        assert.equal(gzipCtx.fetch, outerWrapper, 'Outer wrapper stays intact when inner gzipHook is disabled');
-        assert.equal(outerWrapper.__baiBaiToolkitOriginalFetch, baseFetch, 'Inner gzipHook spliced out cleanly');
-        assert.equal(outerState.rawOriginalFetch, baseFetch, 'Outer hookState.rawOriginalFetch updated cleanly');
+        assert.equal(gzipCtx.fetch, untaggedForeignWrapper, 'Untagged foreign wrapper stays intact when inner gzipHook is disabled');
+        assert.equal(pipelineMod.hasFetchPipelineSlot('saveRequestGzip'), false);
+
+        calls.length = 0;
+        await gzipCtx.fetch('/api/chats/save', { method: 'POST', body: JSON.stringify({ chat: [] }) });
+        assert.equal(foreignCalls, 1, 'Foreign wrapper executes once during empty pass-through');
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].encoding, null, 'Disabled gzipHook passes plain JSON through beneath foreign wrapper');
+
+        // Re-enable gzipHook (0 -> 1) and add another slot (1 -> 2) while untagged foreign wrapper remains on top
+        gzipSettings.saveRequestGzipEnabled = true;
+        gzipMod.syncSaveRequestGzipFetchHook();
+        pipelineMod.registerFetchPipelineSlot('perfTrace', (input, init, nextFetch) => nextFetch(input, init));
+        assert.equal(gzipCtx.fetch, untaggedForeignWrapper, 'Untagged foreign wrapper stays on top across 0 -> 1 -> 2 slot changes');
+
+        calls.length = 0;
+        await gzipCtx.fetch('/api/chats/save', { method: 'POST', body: JSON.stringify({ chat: [] }) });
+        assert.equal(foreignCalls, 2, 'Zero recursion under untagged foreign wrapper');
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].encoding, 'gzip', 'Re-enabled gzipHook compresses once beneath untagged foreign wrapper');
+
+        // Synchronous throw inside slot handler must convert to rejected Promise rather than throwing synchronously
+        pipelineMod.registerFetchPipelineSlot('perfTrace', () => {
+            throw new Error('sync slot failure');
+        });
+        const syncThrowPromise = gzipCtx.fetch('/api/chats/save', { method: 'POST', body: '{}' });
+        assert.equal(typeof syncThrowPromise?.then, 'function', 'Dispatcher must return a Promise even if a slot throws synchronously');
+        await assert.rejects(() => syncThrowPromise, /sync slot failure/);
+        pipelineMod.unregisterFetchPipelineSlot('perfTrace');
 
         // Reset to clean gzipHook for retry policy checks
+        pipelineMod.resetFetchPipeline();
         gzipCtx.fetch = baseFetch;
         gzipSettings.saveRequestGzipEnabled = true;
         gzipMod.syncSaveRequestGzipFetchHook();
@@ -1797,6 +1836,10 @@ test('WP-3: fetchPipeline preserves topological order across gzipHook re-enable 
             './state.js': { settings: gzipSettings },
         });
 
+        const themeSettings = {
+            baibaokuSettingsAccelerationEnabled: true,
+            baibaokuLazyThemeLoadingEnabled: true,
+        };
         const themeMod = await loadVmModule('../src/features/theme.js', pipeCtx, {
             '@sillytavern/script': { getRequestHeaders: () => ({ 'Content-Type': 'application/json' }), saveSettingsDebounced: () => {} },
             '@sillytavern/scripts/power-user': { applyPowerUserSettings: () => {}, power_user: {} },
@@ -1829,7 +1872,7 @@ test('WP-3: fetchPipeline preserves topological order across gzipHook re-enable 
             },
             './customCss.js': { syncCustomCssStateFromSettings: () => {} },
             './gzipHook.js': gzipMod,
-            './state.js': { extensionState: {}, settings: {} },
+            './state.js': { extensionState: {}, settings: themeSettings },
         });
 
         const autoBackupMod = await loadVmModule('../src/preset/autoBackup.js', pipeCtx, {
@@ -1858,7 +1901,7 @@ test('WP-3: fetchPipeline preserves topological order across gzipHook re-enable 
             },
         });
 
-        themeMod.installThemePageCacheSyncFetchHook();
+        themeMod.syncThemePageCacheSyncFetchHook();
         autoBackupMod.installPresetAutoBackupFetchHook();
         gzipMod.syncSaveRequestGzipFetchHook();
 
@@ -1898,6 +1941,15 @@ test('WP-3: fetchPipeline preserves topological order across gzipHook re-enable 
             { name: 'NordReenabled', blur_strength: 12 },
             'theme.js must still inspect plain JSON body before inner gzipHook compresses it',
         );
+
+        // Disabling lazy theme loading via syncThemePageCacheSyncFetchHook unregisters themeCacheSync and flushes stale cache
+        themeSettings.baibaokuLazyThemeLoadingEnabled = false;
+        themeMod.syncThemePageCacheSyncFetchHook();
+        assert.equal(pipelineMod.hasFetchPipelineSlot('themeCacheSync'), false, 'Disabled lazy theme loading must unregister themeCacheSync slot');
+        assert.equal(themeMod.baibaokuThemePageCache.size, 0, 'Disabled lazy theme loading must clear baibaokuThemePageCache');
+        themeSettings.baibaokuLazyThemeLoadingEnabled = true;
+        themeMod.syncThemePageCacheSyncFetchHook();
+        assert.equal(pipelineMod.hasFetchPipelineSlot('themeCacheSync'), true, 'Re-enabled lazy theme loading restores themeCacheSync slot');
 
         wireCalls.length = 0;
         backupPayloads.length = 0;

@@ -34,9 +34,13 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('P-4 / WP-1：chatPersistence 按需管道挂载、严格会话归属与压缩请求体解析', () => {
-  it('无活跃观察作用域时不包裹 globalThis.fetch；作用域期间按需挂载、保留外层包装并在结束或 teardown 时彻底卸载', async () => {
-    const baseFetch = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
+describe('P-4 / WP-1：chatPersistence 按需管道挂载、无标记外部包装共存与严格会话归属', () => {
+  it('无活跃观察作用域时不包裹 globalThis.fetch；与无标记外部 fetch 包装共存不递归，且空闲无外层包装时还原 baseFetch', async () => {
+    let networkCalls = 0;
+    const baseFetch = vi.fn(async () => {
+      networkCalls += 1;
+      return new Response('{"ok":true}', { status: 200 });
+    });
     vi.stubGlobal('fetch', baseFetch);
 
     // 1. 空闲状态下调用 ensureChatSaveFetchObserver 绝不包裹 globalThis.fetch
@@ -50,7 +54,7 @@ describe('P-4 / WP-1：chatPersistence 按需管道挂载、严格会话归属�
       getCurrentChatId: () => 'chat-a',
     });
 
-    // 2. 进入观察作用域时挂载管道，支持外层包装共存，结束后无其它槽位时自动还原 baseFetch
+    // 2. 无外部包装时：进入观察作用域挂载调度器，退出后完全还原 baseFetch
     await runWithObservedChatSave(
       {
         expectedChatId: 'chat-a',
@@ -58,42 +62,71 @@ describe('P-4 / WP-1：chatPersistence 按需管道挂载、严格会话归属�
         requireHttpSave: true,
       },
       async () => {
-        const dispatcher = globalThis.fetch;
-        expect(dispatcher).not.toBe(baseFetch);
+        expect(globalThis.fetch).not.toBe(baseFetch);
         expect(hasFetchPipelineSlot('chatSaveObserver')).toBe(true);
+        await fetch('/api/chats/save', {
+          method: 'POST',
+          body: JSON.stringify({ avatar_url: 'alice.png', file_name: 'chat-a', chat: [] }),
+        });
+      },
+    );
+    expect(hasFetchPipelineSlot('chatSaveObserver')).toBe(false);
+    expect(globalThis.fetch).toBe(baseFetch);
+    expect(networkCalls).toBe(1);
 
-        const outerWrapper = Object.assign(
-          function outer(input: RequestInfo | URL, init?: RequestInit) {
-            return (outerWrapper as unknown as { __baiBaiToolkitOriginalFetch: typeof fetch }).__baiBaiToolkitOriginalFetch(
-              input,
-              init,
-            );
-          },
-          { __baiBaiToolkitOriginalFetch: dispatcher },
-        );
-        globalThis.fetch = outerWrapper as unknown as typeof fetch;
+    // 3. 其它扩展在我们挂载后以无任何自定义属性标签的闭包包装 globalThis.fetch：
+    //    后续再次注册/切换/退出再进入观察作用域时，绝不能二次包裹形成无限递归！
+    let foreignWrapperCalls = 0;
+    await runWithObservedChatSave(
+      {
+        expectedChatId: 'chat-a',
+        expectedIdentity: 'character:alice.png\u0000chat-a',
+        requireHttpSave: true,
+      },
+      async () => {
+        const currentFetch = globalThis.fetch;
+        const untaggedForeignWrapper = function foreignFetch(
+          input: RequestInfo | URL,
+          init?: RequestInit,
+        ) {
+          foreignWrapperCalls += 1;
+          return currentFetch(input, init);
+        };
+        globalThis.fetch = untaggedForeignWrapper as typeof fetch;
 
+        // 触发二次同步挂载检查与嵌套观察作用域：必须保持 untaggedForeignWrapper 在最顶层且零递归
         ensureChatSaveFetchObserver();
-        expect(globalThis.fetch).toBe(outerWrapper);
+        expect(globalThis.fetch).toBe(untaggedForeignWrapper);
+        expect(hasFetchPipelineSlot('chatSaveObserver')).toBe(true);
 
         await fetch('/api/chats/save', {
           method: 'POST',
           body: JSON.stringify({ avatar_url: 'alice.png', file_name: 'chat-a', chat: [] }),
         });
-
-        // 卸载验证前去掉外层手工包装测试：外层仍保留且 __baiBaiToolkitOriginalFetch 会在作用域退出时缝合回 baseFetch
-        expect(
-          (outerWrapper as unknown as { __baiBaiToolkitOriginalFetch: typeof fetch }).__baiBaiToolkitOriginalFetch,
-        ).toBe(dispatcher);
       },
     );
-
     expect(hasFetchPipelineSlot('chatSaveObserver')).toBe(false);
-    expect(
-      (globalThis.fetch as unknown as { __baiBaiToolkitOriginalFetch: typeof fetch }).__baiBaiToolkitOriginalFetch,
-    ).toBe(baseFetch);
+    expect(foreignWrapperCalls).toBe(1);
+    expect(networkCalls).toBe(2);
 
-    // 3. 测试中用全新 mock 完全替换 globalThis.fetch 时，新观察作用域能够重新锚定并在 teardownChatSaveObserver 时立即卸载
+    // 1 -> 0 -> 1 再次进入观察作用域（无标记外部包装仍在顶层）：依旧只执行一次且准确观测落盘
+    await runWithObservedChatSave(
+      {
+        expectedChatId: 'chat-a',
+        expectedIdentity: 'character:alice.png\u0000chat-a',
+        requireHttpSave: true,
+      },
+      async () => {
+        await fetch('/api/chats/save', {
+          method: 'POST',
+          body: JSON.stringify({ avatar_url: 'alice.png', file_name: 'chat-a', chat: [] }),
+        });
+      },
+    );
+    expect(foreignWrapperCalls).toBe(2);
+    expect(networkCalls).toBe(3);
+
+    // 4. 测试中用全新 mock 完全替换 globalThis.fetch 时，旧调度器退役，新观察作用域重新锚定并在 teardown 时立即还原
     const freshMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
     vi.stubGlobal('fetch', freshMock);
 

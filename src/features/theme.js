@@ -161,32 +161,40 @@ function installThemePageCacheSyncFetchHook() {
 
     const state = existing && typeof existing === 'object' ? existing : {};
 
-    registerFetchPipelineSlot('themeCacheSync', async function baiBaiToolkitThemeCacheSyncFetch(input, init, nextFetch) {
+    registerFetchPipelineSlot('themeCacheSync', function baiBaiToolkitThemeCacheSyncFetch(input, init, nextFetch) {
         let pathname = '';
-        let body = null;
-
         try {
             pathname = getThemeMutationRequestPath(input, init);
-            if (pathname) {
-                // 先取请求体:Request 流只能读一次,等响应回来后可能已被消费。
-                body = await getThemeMutationRequestBody(input, init);
-            }
         } catch {
             pathname = '';
         }
 
-        const response = await nextFetch(input, init);
-
-        if (pathname && response?.ok) {
-            try {
-                syncThemePageCacheAfterMutation(pathname, body);
-            } catch (error) {
-                console.warn(`${LOG_PREFIX} Failed to sync theme page cache after ${pathname}:`, error);
-                baibaokuThemePageCache.clear();
-            }
+        if (!pathname) {
+            return nextFetch(input, init);
         }
 
-        return response;
+        return (async () => {
+            let body = null;
+            try {
+                // 先取请求体:Request 流只能读一次,等响应回来后可能已被消费。
+                body = await getThemeMutationRequestBody(input, init);
+            } catch {
+                body = null;
+            }
+
+            const response = await nextFetch(input, init);
+
+            if (response?.ok) {
+                try {
+                    syncThemePageCacheAfterMutation(pathname, body);
+                } catch (error) {
+                    console.warn(`${LOG_PREFIX} Failed to sync theme page cache after ${pathname}:`, error);
+                    baibaokuThemePageCache.clear();
+                }
+            }
+
+            return response;
+        })();
     });
 
     globalThis[THEME_CACHE_SYNC_FETCH_KEY] = state;
@@ -194,9 +202,18 @@ function installThemePageCacheSyncFetchHook() {
 }
 
 function disableThemePageCacheSyncFetchHook() {
+    baibaokuThemePageCache.clear();
     const removed = unregisterFetchPipelineSlot('themeCacheSync');
     delete globalThis[THEME_CACHE_SYNC_FETCH_KEY];
     return removed;
+}
+
+function syncThemePageCacheSyncFetchHook() {
+    if (settings.baibaokuSettingsAccelerationEnabled !== false && settings.baibaokuLazyThemeLoadingEnabled !== false) {
+        return installThemePageCacheSyncFetchHook();
+    }
+    disableThemePageCacheSyncFetchHook();
+    return null;
 }
 
 function applyBaibaokuThemeColorBindings() {
@@ -865,7 +882,7 @@ function installThemeSwitchPointerdownPrewarm() {
 }
 
 function applyBaibaokuLazyThemeLoadingOptimization() {
-    installThemePageCacheSyncFetchHook();
+    syncThemePageCacheSyncFetchHook();
     installThemeSwitchPointerdownPrewarm();
 
     const state = getLazyThemeChangeGuardState();
@@ -973,4 +990,5 @@ export {
     syncCustomCssCodeMirrorFromThemeChange,
     syncThemeManagerActiveTheme,
     syncThemeManagerAfterLazyThemeApply,
+    syncThemePageCacheSyncFetchHook,
 };

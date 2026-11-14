@@ -23,7 +23,7 @@ export type FetchPipelineHandler = (
   init: RequestInit | undefined,
   nextFetch: FetchPipelineNext,
   thisArg: unknown,
-) => Promise<Response>;
+) => Promise<Response> | Response;
 
 export const FETCH_PIPELINE_KEY: '__baiBaiToolkitFetchPipeline';
 export const FETCH_PIPELINE_SLOT_ORDER: readonly string[];
@@ -41,5 +41,3 @@ export function callUnderlyingFetch(
   thisArg?: unknown,
 ): Promise<Response>;
 export function resetFetchPipeline(): boolean;
-export function isFetchWrapperInChain(root: unknown, target: unknown): boolean;
-export function spliceFetchWrapperOut(wrappedFetch: unknown, rawOriginalFetch: unknown): boolean;

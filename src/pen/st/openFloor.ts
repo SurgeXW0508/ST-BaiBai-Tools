@@ -184,17 +184,15 @@ export async function applyFloorText(
 
   setMessageText(message, nextText);
 
-  let observedHttpSave = false;
   try {
     const saveChat = context.saveChat;
-    const outcome = await runWithObservedChatSave(
+    await runWithObservedChatSave(
       {
         target,
         requireHttpSave: expectsHttpChatPersistence(context),
       },
       () => saveChat(),
     );
-    observedHttpSave = outcome.observedHttpSave;
   } catch (error) {
     rollbackMessage();
     throw error;
@@ -202,13 +200,8 @@ export async function applyFloorText(
 
   const postSaveContext = getLiveTargetContext();
 
-  // 若未观测到指向原聊天的成功 HTTP 落盘且等待期间聊天已切换，回滚原消息并按切聊中止；
-  // 若原聊天已确认落盘但此后会话或楼层已漂移，直接返回 'saved' 且绝不触碰新聊天事件或 DOM。
+  // 原聊天已确认 HTTP 落盘，但此后会话或楼层已漂移：直接返回 'saved'，绝不触碰新聊天事件或 DOM。
   if (!postSaveContext) {
-    if (!observedHttpSave) {
-      rollbackMessage();
-      return 'chat-changed';
-    }
     return 'saved';
   }
 

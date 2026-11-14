@@ -1,7 +1,7 @@
 import { saveBaibaokuFastConfig } from './baibaokuPanel.js';
 import { applyFastChatGetOptimization } from './fastChat.js';
 import { settings } from './state.js';
-import { getBaibaokuEarlyBridge } from './theme.js';
+import { getBaibaokuEarlyBridge, syncThemePageCacheSyncFetchHook } from './theme.js';
 
 async function setBaibaokuSettingsAccelerationEnabled(enabled) {
     const next = Boolean(enabled);
@@ -11,6 +11,7 @@ async function setBaibaokuSettingsAccelerationEnabled(enabled) {
     if (!next) {
         settings.baibaokuLazyThemeLoadingEnabled = false;
     }
+    syncThemePageCacheSyncFetchHook();
 
     const bridge = getBaibaokuEarlyBridge();
     if (typeof bridge?.setSettingsAccelerationEnabled === 'function') {
@@ -38,6 +39,7 @@ async function setBaibaokuSettingsAccelerationEnabled(enabled) {
         const savedLazyEnabled = savedEnabled && saved.lazyThemeLoadingEnabled !== false;
         settings.baibaokuSettingsAccelerationEnabled = savedEnabled;
         settings.baibaokuLazyThemeLoadingEnabled = savedLazyEnabled;
+        syncThemePageCacheSyncFetchHook();
         if (typeof bridge?.setSettingsAccelerationEnabled === 'function') {
             bridge.setSettingsAccelerationEnabled(savedEnabled);
         } else if (bridge) {
@@ -55,6 +57,7 @@ async function setBaibaokuSettingsAccelerationEnabled(enabled) {
     } catch (error) {
         settings.baibaokuSettingsAccelerationEnabled = previous;
         settings.baibaokuLazyThemeLoadingEnabled = previousLazy;
+        syncThemePageCacheSyncFetchHook();
         if (typeof bridge?.setSettingsAccelerationEnabled === 'function') {
             bridge.setSettingsAccelerationEnabled(previous);
         } else if (bridge) {
@@ -77,6 +80,7 @@ async function setBaibaokuLazyThemeLoadingEnabled(enabled) {
     if (next) {
         settings.baibaokuSettingsAccelerationEnabled = true;
     }
+    syncThemePageCacheSyncFetchHook();
 
     const bridge = getBaibaokuEarlyBridge();
     if (typeof bridge?.setLazyThemeLoadingEnabled === 'function') {
@@ -104,6 +108,7 @@ async function setBaibaokuLazyThemeLoadingEnabled(enabled) {
         const savedLazyEnabled = savedSettingsEnabled && saved.lazyThemeLoadingEnabled !== false;
         settings.baibaokuLazyThemeLoadingEnabled = savedLazyEnabled;
         settings.baibaokuSettingsAccelerationEnabled = savedSettingsEnabled;
+        syncThemePageCacheSyncFetchHook();
         if (typeof bridge?.setLazyThemeLoadingEnabled === 'function') {
             bridge.setLazyThemeLoadingEnabled(savedLazyEnabled);
         } else if (bridge) {
@@ -121,6 +126,7 @@ async function setBaibaokuLazyThemeLoadingEnabled(enabled) {
     } catch (error) {
         settings.baibaokuLazyThemeLoadingEnabled = previousLazy;
         settings.baibaokuSettingsAccelerationEnabled = previousSettings;
+        syncThemePageCacheSyncFetchHook();
         if (typeof bridge?.setLazyThemeLoadingEnabled === 'function') {
             bridge.setLazyThemeLoadingEnabled(previousLazy);
         } else if (bridge) {

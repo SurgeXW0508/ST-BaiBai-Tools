@@ -336,7 +336,7 @@ function disablePerformanceTraceFetchHook() {
 }
 
 function syncPerformanceTraceFetchHook() {
-    if (getPerformanceTraceState().active === true || settings.performanceTraceEnabled === true) {
+    if (getPerformanceTraceState().active === true) {
         return installPerformanceTraceFetchHook();
     }
     disablePerformanceTraceFetchHook();

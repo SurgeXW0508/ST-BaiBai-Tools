@@ -1,7 +1,6 @@
 import { saveSettingsDebounced } from '@sillytavern/script';
 import { extension_settings } from '@sillytavern/scripts/extensions';
-import { EXTENSION_KEY, SETTINGS_KEY } from './constants.js';
-const BAIBAOKU_EARLY_BRIDGE_KEY = '__baibaokuEarlyBridge';
+import { BAIBAOKU_EARLY_BRIDGE_KEY, EXTENSION_KEY, SETTINGS_KEY } from './constants.js';
 const MODULE_NAME = getModuleName();
 const EXTENSION_ID = getExtensionId();
 const defaultSettings = {
