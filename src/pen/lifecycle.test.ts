@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+vi.mock('@pen/App.vue', () => ({ default: {} }));
+
 import { bindEditButtons, unbindEditButtons } from '@pen/editButton';
 import { removeStEventListener } from '@pen/st/context';
 import { guardEditableArrowKeys } from '@pen/st/keyboard';
@@ -179,5 +181,75 @@ describe('P-6：guardEditableArrowKeys 幂等注册与 resetPenUiState 重置', 
       chatIdentity: '',
       paragraphs: [],
     });
+  });
+
+  it('stopPen force-clears active chatSaveObserver scopes and restores globalThis.fetch when disabled', async () => {
+    const { startPen, stopPen } = await import('@pen/index');
+    const { runWithObservedChatSave } = await import('@pen/st/chatPersistence');
+    const { hasFetchPipelineSlot } = await import('../features/fetchPipeline.js');
+
+    const baseFetch = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
+    vi.stubGlobal('fetch', baseFetch);
+    vi.stubGlobal('MutationObserver', class {
+      observe = vi.fn();
+      disconnect = vi.fn();
+    });
+    vi.stubGlobal('window', {
+      setInterval: vi.fn(() => 1),
+      clearInterval: vi.fn(),
+      setTimeout: vi.fn(() => 1),
+      clearTimeout: vi.fn(),
+      SillyTavern: {
+        getContext: () => ({
+          chat: [{ name: 'Alice', is_user: false, is_system: false, mes: '正文' }],
+          characterId: 0,
+          characters: [{ name: 'Alice', avatar: 'alice.png', chat: 'chat-a' }],
+          extensionSettings: {},
+          saveSettingsDebounced: vi.fn(),
+          getCurrentChatId: () => 'chat-a',
+          getRequestHeaders: () => ({}),
+        }),
+      },
+    });
+    vi.stubGlobal('document', {
+      getElementById: vi.fn(() => null),
+      createElement: vi.fn(() => ({
+        id: '',
+        textContent: '',
+        remove: vi.fn(),
+      })),
+      head: { append: vi.fn() },
+      querySelector: vi.fn(() => null),
+      querySelectorAll: vi.fn(() => []),
+    });
+
+    startPen();
+    expect(globalThis.fetch).toBe(baseFetch);
+
+    let releaseSave!: () => void;
+    const saveGate = new Promise<void>(resolve => {
+      releaseSave = resolve;
+    });
+
+    const pendingSave = runWithObservedChatSave(
+      {
+        expectedChatId: 'chat-a',
+        expectedIdentity: 'character:alice.png\u0000chat-a',
+        requireHttpSave: false,
+      },
+      async () => {
+        expect(hasFetchPipelineSlot('chatSaveObserver')).toBe(true);
+        expect(globalThis.fetch).not.toBe(baseFetch);
+
+        // 用户关闭新版楼层管理器开关 -> stopPen() 立即清退 chatSaveObserver 并恢复原始 fetch
+        stopPen();
+        expect(hasFetchPipelineSlot('chatSaveObserver')).toBe(false);
+        expect(globalThis.fetch).toBe(baseFetch);
+        releaseSave();
+      },
+    );
+
+    await pendingSave;
+    expect(globalThis.fetch).toBe(baseFetch);
   });
 });

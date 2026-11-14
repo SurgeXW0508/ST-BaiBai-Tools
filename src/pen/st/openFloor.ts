@@ -1,6 +1,7 @@
 import {
-  assertChatPersistable,
   expectsHttpChatPersistence,
+  isTargetStillActive,
+  resolveBoundChatTarget,
   runWithObservedChatSave,
 } from '@pen/st/chatPersistence';
 import {
@@ -77,24 +78,30 @@ async function emitMessageEvent(
 }
 
 async function refreshRenderedMessage(
-  context: STContext,
   message: STMessage,
   floor: number,
+  getLiveTargetContext: () => STContext | null,
 ): Promise<void> {
+  const liveBeforeUpdate = getLiveTargetContext();
+  if (!liveBeforeUpdate) return;
+
   const existing = findMessage(floor);
   if (!existing) return;
 
-  if (typeof context.updateMessageBlock === 'function') {
+  if (typeof liveBeforeUpdate.updateMessageBlock === 'function') {
     try {
-      await context.updateMessageBlock(floor, message);
+      await liveBeforeUpdate.updateMessageBlock(floor, message);
       return;
     } catch {
       // 局部刷新失败时回退到完整重载。
     }
   }
 
+  const liveBeforeReload = getLiveTargetContext();
+  if (!liveBeforeReload) return;
+
   try {
-    await context.reloadCurrentChat?.();
+    await liveBeforeReload.reloadCurrentChat?.();
   } catch (error) {
     console.warn('[柏宝砚] 楼层已保存，但界面刷新失败', error);
   }
@@ -138,12 +145,19 @@ export async function applyFloorText(
   const editorText = activeEditorText(floor);
   if ((editorText ?? message.mes) !== expectedText) return 'floor-changed';
 
-  const { chatId: activeChatId, chatIdentity: activeIdentity } = assertChatPersistable(
+  const target = resolveBoundChatTarget(
     context,
+    expectedChatId,
+    expectedChatIdentity,
     '保存修改',
   );
-  const lockChatId = expectedChatId || activeChatId;
-  const lockIdentity = expectedChatIdentity || activeIdentity;
+
+  const getLiveTargetContext = (): STContext | null => {
+    const live = getContext() ?? context;
+    if (!isTargetStillActive(target, live)) return null;
+    if (live.chat?.[floor] !== message) return null;
+    return live;
+  };
 
   const previousText = message.mes;
   const currentSwipe =
@@ -175,8 +189,7 @@ export async function applyFloorText(
     const saveChat = context.saveChat;
     const outcome = await runWithObservedChatSave(
       {
-        expectedChatId: lockChatId,
-        expectedIdentity: lockIdentity,
+        target,
         requireHttpSave: expectsHttpChatPersistence(context),
       },
       () => saveChat(),
@@ -187,13 +200,11 @@ export async function applyFloorText(
     throw error;
   }
 
-  const postContext = getContext() ?? context;
-  const stillSameChat =
-    matchesExpectedTargetChat(postContext, lockChatId, lockIdentity) &&
-    postContext.chat?.[floor] === message;
+  const postSaveContext = getLiveTargetContext();
 
-  // 若未观测到指向原聊天的成功 HTTP 落盘且等待期间聊天已切换，回滚原消息并按切聊中止。
-  if (!stillSameChat) {
+  // 若未观测到指向原聊天的成功 HTTP 落盘且等待期间聊天已切换，回滚原消息并按切聊中止；
+  // 若原聊天已确认落盘但此后会话或楼层已漂移，直接返回 'saved' 且绝不触碰新聊天事件或 DOM。
+  if (!postSaveContext) {
     if (!observedHttpSave) {
       rollbackMessage();
       return 'chat-changed';
@@ -201,12 +212,28 @@ export async function applyFloorText(
     return 'saved';
   }
 
-  await emitMessageEvent(postContext, postContext.eventTypes?.MESSAGE_EDITED, floor).catch(error => {
-    console.warn('[柏宝砚] 楼层已保存，但 MESSAGE_EDITED 事件发送失败', error);
-  });
+  await emitMessageEvent(postSaveContext, postSaveContext.eventTypes?.MESSAGE_EDITED, floor).catch(
+    error => {
+      console.warn('[柏宝砚] 楼层已保存，但 MESSAGE_EDITED 事件发送失败', error);
+    },
+  );
+
+  const postEditEventContext = getLiveTargetContext();
+  if (!postEditEventContext) {
+    return 'saved';
+  }
+
   if (!settleActiveEditor(floor, message.mes)) {
-    await refreshRenderedMessage(postContext, message, floor);
-    await emitMessageEvent(postContext, postContext.eventTypes?.MESSAGE_UPDATED, floor).catch(error => {
+    await refreshRenderedMessage(message, floor, getLiveTargetContext);
+    const postRefreshContext = getLiveTargetContext();
+    if (!postRefreshContext) {
+      return 'saved';
+    }
+    await emitMessageEvent(
+      postRefreshContext,
+      postRefreshContext.eventTypes?.MESSAGE_UPDATED,
+      floor,
+    ).catch(error => {
       console.warn('[柏宝砚] 楼层已保存，但 MESSAGE_UPDATED 事件发送失败', error);
     });
   }

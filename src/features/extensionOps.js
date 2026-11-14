@@ -20,6 +20,7 @@ import {
     EXTENSION_UPDATE_PATH,
     LOG_PREFIX,
 } from './constants.js';
+import { hasFetchPipelineSlot, registerFetchPipelineSlot } from './fetchPipeline.js';
 import { buildFetchHeaders, getFetchRequestMethod, getFetchRequestUrl } from './gzipHook.js';
 import { extensionState } from './state.js';
 import { hasUserInteracted } from './updateDiagnostics.js';
@@ -161,30 +162,27 @@ async function ensureExtensionInterceptEnabled() {
 }
 
 function installExtensionOpsFetchHook() {
-    const existing = globalThis[EXTENSION_OPS_FETCH_KEY];
-    if (existing?.wrappedFetch) {
-        return existing;
-    }
-
-    const rawOriginalFetch = globalThis.fetch;
-    if (typeof rawOriginalFetch !== 'function') {
+    if (typeof globalThis.fetch !== 'function') {
         return null;
     }
 
-    const hook = {
-        rawOriginalFetch,
-        originalFetch: rawOriginalFetch.bind(globalThis),
-        wrappedFetch: null,
-    };
+    const existing = globalThis[EXTENSION_OPS_FETCH_KEY];
+    if (existing && hasFetchPipelineSlot('extensionOps')) {
+        return existing;
+    }
 
-    hook.wrappedFetch = async function baiBaiToolkitExtensionOpsFetch(input, init) {
+    const hook = existing && typeof existing === 'object'
+        ? existing
+        : { lifecycleInstalled: false };
+
+    registerFetchPipelineSlot('extensionOps', async function baiBaiToolkitExtensionOpsFetch(input, init, nextFetch) {
         const kind = getOperationKind(input, init);
         if (!kind) {
-            return hook.originalFetch(input, init);
+            return nextFetch(input, init);
         }
 
         if (!(await ensureExtensionInterceptEnabled())) {
-            return hook.originalFetch(input, init);
+            return nextFetch(input, init);
         }
 
         const body = await readFetchJsonBody(input, init).catch(() => null);
@@ -204,7 +202,7 @@ function installExtensionOpsFetchHook() {
 
         let response;
         try {
-            response = await hook.originalFetch(input, { ...init, headers });
+            response = await nextFetch(input, { ...init, headers });
         } catch (error) {
             // 请求断了(酒馆前端超时、网络抖动),服务器上的任务可能还在跑,改成轮询拿结果
             entry.detached = true;
@@ -215,20 +213,19 @@ function installExtensionOpsFetchHook() {
 
         handleOperationResponse(entry, response);
         return response;
-    };
-
-    hook.wrappedFetch[EXTENSION_OPS_FETCH_KEY] = true;
-    hook.wrappedFetch.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
-    hook.wrappedFetch.__baiBaiToolkitHookState = hook;
-    globalThis[EXTENSION_OPS_FETCH_KEY] = hook;
-    globalThis.fetch = hook.wrappedFetch;
-
-    // 刷新前没报完的操作接着查,没来得及看的提示补上
-    restorePendingOperations();
-    eventSource.once(event_types.APP_READY, () => {
-        replayNotices();
-        schedulePoll(0);
     });
+
+    globalThis[EXTENSION_OPS_FETCH_KEY] = hook;
+
+    if (!hook.lifecycleInstalled) {
+        hook.lifecycleInstalled = true;
+        // 刷新前没报完的操作接着查,没来得及看的提示补上
+        restorePendingOperations();
+        eventSource.once(event_types.APP_READY, () => {
+            replayNotices();
+            schedulePoll(0);
+        });
+    }
     return hook;
 }
 

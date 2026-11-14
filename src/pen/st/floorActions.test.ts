@@ -335,4 +335,58 @@ describe('deleteFloorsFrom', () => {
     await expect(deleteFloorsFrom(0)).rejects.toThrow('HTTP 500');
     expect(reloadCurrentChat).toHaveBeenCalledOnce();
   });
+
+  it('does not call reloadCurrentChat on Character B if the user switched chats before failed /del recovery', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('Server Error', { status: 500 })),
+    );
+    const reloadA = vi.fn(async () => undefined);
+    const reloadB = vi.fn(async () => undefined);
+    const chatA = [{ name: 'Alice', is_user: false, is_system: false, mes: 'Alice-0' }];
+    const chatB = [{ name: 'Bob', is_user: false, is_system: false, mes: 'Bob-0' }];
+
+    let activeContext: Record<string, unknown> = {
+      chat: chatA,
+      characterId: 0,
+      characters: [
+        { name: 'Alice', avatar: 'alice.png', chat: 'chat-a' },
+        { name: 'Bob', avatar: 'bob.png', chat: 'chat-b' },
+      ],
+      getCurrentChatId: () => 'chat-a',
+      reloadCurrentChat: reloadA,
+      POPUP_TYPE: { CONFIRM: 'confirm' },
+      callGenericPopup: vi.fn(async () => true),
+      executeSlashCommandsWithOptions: vi.fn(async () => {
+        chatA.splice(0);
+        await fetch('/api/chats/save', {
+          method: 'POST',
+          body: JSON.stringify({ avatar_url: 'alice.png', file_name: 'chat-a', chat: [] }),
+        });
+        // 保存失败后、catch 恢复前用户已切换到会话 B
+        activeContext = {
+          ...activeContext,
+          chat: chatB,
+          characterId: 1,
+          getCurrentChatId: () => 'chat-b',
+          reloadCurrentChat: reloadB,
+        };
+        return undefined;
+      }),
+    };
+
+    vi.stubGlobal('window', {
+      SillyTavern: {
+        getContext: () => activeContext,
+      },
+    });
+    vi.stubGlobal('document', {
+      querySelector: vi.fn(() => null),
+      querySelectorAll: vi.fn(() => []),
+    });
+
+    await expect(deleteFloorsFrom(0)).rejects.toThrow('HTTP 500');
+    expect(reloadA).not.toHaveBeenCalled();
+    expect(reloadB).not.toHaveBeenCalled();
+  });
 });

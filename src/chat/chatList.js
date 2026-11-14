@@ -1,47 +1,7 @@
 import { getRequestHeaders } from '@sillytavern/script';
+import { hasFetchPipelineSlot, registerFetchPipelineSlot, unregisterFetchPipelineSlot } from '../features/fetchPipeline.js';
 import { BAIBAOKU_FAST_CHAT_BACKUPS_LIST_URL, BAIBAOKU_FAST_SEARCH_URL, CHAT_BACKUP_ITEM_INTRINSIC_FALLBACK_PX, CHAT_BACKUP_ITEM_INTRINSIC_SIZE_VAR, CHAT_BACKUP_ITEM_SELECTOR, CHAT_BACKUP_LIST_SELECTOR, CHAT_MANAGEMENT_LIST_SELECTOR, CHAT_MANAGEMENT_POPUP_SELECTOR, FAST_CHAT_BACKUPS_FETCH_KEY, FAST_CHAT_LIST_SCROLL_STYLE_ID, FAST_CHAT_SEARCH_FETCH_KEY, NATIVE_CHAT_BACKUPS_LIST_URL } from './constants.js';
 import { LOG_PREFIX, extensionState, settings } from './state.js';
-
-function isFetchWrapperInChain(root, target) {
-    if (typeof root !== 'function' || typeof target !== 'function') {
-        return false;
-    }
-    const visited = new Set();
-    let cursor = root;
-    while (typeof cursor === 'function' && !visited.has(cursor)) {
-        if (cursor === target) {
-            return true;
-        }
-        visited.add(cursor);
-        cursor = cursor.__baiBaiToolkitOriginalFetch;
-    }
-    return false;
-}
-
-function spliceFetchWrapperOut(wrappedFetch, rawOriginalFetch) {
-    if (typeof wrappedFetch !== 'function' || typeof rawOriginalFetch !== 'function') {
-        return false;
-    }
-    if (globalThis.fetch === wrappedFetch) {
-        globalThis.fetch = rawOriginalFetch;
-        return true;
-    }
-    const visited = new Set();
-    let cursor = globalThis.fetch;
-    while (typeof cursor === 'function' && !visited.has(cursor)) {
-        visited.add(cursor);
-        if (cursor.__baiBaiToolkitOriginalFetch === wrappedFetch) {
-            cursor.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
-            if (cursor.__baiBaiToolkitHookState && typeof cursor.__baiBaiToolkitHookState === 'object') {
-                cursor.__baiBaiToolkitHookState.rawOriginalFetch = rawOriginalFetch;
-                cursor.__baiBaiToolkitHookState.originalFetch = rawOriginalFetch.bind(globalThis);
-            }
-            return true;
-        }
-        cursor = cursor.__baiBaiToolkitOriginalFetch;
-    }
-    return false;
-}
 
 function applyFastChatListScrollOptimization() {
     const existingStyle = document.getElementById(FAST_CHAT_LIST_SCROLL_STYLE_ID);
@@ -265,34 +225,32 @@ function clearChatManagementPopupContent(popup) {
 }
 
 function patchFastChatSearchFetch() {
+    if (typeof globalThis.fetch !== 'function') {
+        return null;
+    }
+
     const existing = globalThis[FAST_CHAT_SEARCH_FETCH_KEY];
-    if (existing?.wrappedFetch && isFetchWrapperInChain(globalThis.fetch, existing.wrappedFetch)) {
+    if (existing && hasFetchPipelineSlot('fastChatSearch')) {
         existing.disabled = false;
         return existing;
     }
 
-    const rawOriginalFetch = globalThis.fetch;
-    if (typeof rawOriginalFetch !== 'function') {
-        return null;
-    }
+    const state = existing && typeof existing === 'object'
+        ? existing
+        : { disabled: false };
 
-    const state = {
-        rawOriginalFetch,
-        originalFetch: rawOriginalFetch.bind(globalThis),
-        wrappedFetch: null,
-        disabled: false,
-    };
+    state.disabled = false;
 
-    async function baiBaiToolkitFetch(input, init) {
+    registerFetchPipelineSlot('fastChatSearch', async function baiBaiToolkitFetch(input, init, nextFetch) {
         if (state.disabled || !settings.fastChatListEnabled) {
-            return state.originalFetch(input, init);
+            return nextFetch(input, init);
         }
 
         const requestData = await getFastChatSearchRequestData(input, init);
 
         if (requestData) {
             try {
-                return await fetchFastSearchList(state.originalFetch, requestData);
+                return await fetchFastSearchList(nextFetch, requestData);
             } catch (error) {
                 if (error?.name === 'AbortError') {
                     throw error;
@@ -301,59 +259,49 @@ function patchFastChatSearchFetch() {
             }
         }
 
-        return state.originalFetch(input, init);
-    }
+        return nextFetch(input, init);
+    });
 
-    baiBaiToolkitFetch[FAST_CHAT_SEARCH_FETCH_KEY] = true;
-    baiBaiToolkitFetch.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
-    baiBaiToolkitFetch.__baiBaiToolkitHookState = state;
-    state.wrappedFetch = baiBaiToolkitFetch;
     globalThis[FAST_CHAT_SEARCH_FETCH_KEY] = state;
-    globalThis.fetch = baiBaiToolkitFetch;
     return state;
 }
 
 function unpatchFastChatSearchFetch() {
     const existing = globalThis[FAST_CHAT_SEARCH_FETCH_KEY];
-    if (!existing?.wrappedFetch) {
-        return false;
+    if (existing && typeof existing === 'object') {
+        existing.disabled = true;
     }
-    existing.disabled = true;
-    const spliced = spliceFetchWrapperOut(existing.wrappedFetch, existing.rawOriginalFetch);
-    if (spliced || !isFetchWrapperInChain(globalThis.fetch, existing.wrappedFetch)) {
-        delete globalThis[FAST_CHAT_SEARCH_FETCH_KEY];
-    }
-    return spliced;
+    const removed = unregisterFetchPipelineSlot('fastChatSearch');
+    delete globalThis[FAST_CHAT_SEARCH_FETCH_KEY];
+    return removed;
 }
 
 function patchFastChatBackupsFetch() {
+    if (typeof globalThis.fetch !== 'function') {
+        return null;
+    }
+
     const existing = globalThis[FAST_CHAT_BACKUPS_FETCH_KEY];
-    if (existing?.wrappedFetch && isFetchWrapperInChain(globalThis.fetch, existing.wrappedFetch)) {
+    if (existing && hasFetchPipelineSlot('fastChatBackups')) {
         existing.disabled = false;
         return existing;
     }
 
-    const rawOriginalFetch = globalThis.fetch;
-    if (typeof rawOriginalFetch !== 'function') {
-        return null;
-    }
+    const state = existing && typeof existing === 'object'
+        ? existing
+        : { disabled: false };
 
-    const state = {
-        rawOriginalFetch,
-        originalFetch: rawOriginalFetch.bind(globalThis),
-        wrappedFetch: null,
-        disabled: false,
-    };
+    state.disabled = false;
 
-    async function baiBaiToolkitChatBackupsFetch(input, init) {
+    registerFetchPipelineSlot('fastChatBackups', async function baiBaiToolkitChatBackupsFetch(input, init, nextFetch) {
         if (state.disabled || !settings.fastChatListEnabled) {
-            return state.originalFetch(input, init);
+            return nextFetch(input, init);
         }
 
         if (isChatBackupsListRequest(input, init)) {
             observeChatManagementPopupCleanup();
             try {
-                return await fetchFastChatBackupsList(state.originalFetch, input, init);
+                return await fetchFastChatBackupsList(nextFetch, input, init);
             } catch (error) {
                 if (error?.name === 'AbortError') {
                     throw error;
@@ -362,29 +310,21 @@ function patchFastChatBackupsFetch() {
             }
         }
 
-        return state.originalFetch(input, init);
-    }
+        return nextFetch(input, init);
+    });
 
-    baiBaiToolkitChatBackupsFetch[FAST_CHAT_BACKUPS_FETCH_KEY] = true;
-    baiBaiToolkitChatBackupsFetch.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
-    baiBaiToolkitChatBackupsFetch.__baiBaiToolkitHookState = state;
-    state.wrappedFetch = baiBaiToolkitChatBackupsFetch;
     globalThis[FAST_CHAT_BACKUPS_FETCH_KEY] = state;
-    globalThis.fetch = baiBaiToolkitChatBackupsFetch;
     return state;
 }
 
 function unpatchFastChatBackupsFetch() {
     const existing = globalThis[FAST_CHAT_BACKUPS_FETCH_KEY];
-    if (!existing?.wrappedFetch) {
-        return false;
+    if (existing && typeof existing === 'object') {
+        existing.disabled = true;
     }
-    existing.disabled = true;
-    const spliced = spliceFetchWrapperOut(existing.wrappedFetch, existing.rawOriginalFetch);
-    if (spliced || !isFetchWrapperInChain(globalThis.fetch, existing.wrappedFetch)) {
-        delete globalThis[FAST_CHAT_BACKUPS_FETCH_KEY];
-    }
-    return spliced;
+    const removed = unregisterFetchPipelineSlot('fastChatBackups');
+    delete globalThis[FAST_CHAT_BACKUPS_FETCH_KEY];
+    return removed;
 }
 
 function applyFastChatListFetchOptimization() {

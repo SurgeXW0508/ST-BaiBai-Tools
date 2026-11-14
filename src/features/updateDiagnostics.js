@@ -16,6 +16,7 @@ import {
     LOG_PREFIX,
 } from './constants.js';
 import { fetchExtensionManagerApi } from './extensionOps.js';
+import { hasFetchPipelineSlot, registerFetchPipelineSlot } from './fetchPipeline.js';
 import { getFetchRequestMethod, getFetchRequestUrl } from './gzipHook.js';
 import { extensionState } from './state.js';
 import { readFetchJsonBody } from './util.js';
@@ -54,35 +55,30 @@ function hasUserInteracted() {
 }
 
 function installExtensionUpdateDiagnosticsFetchHook() {
-    const existing = globalThis[EXTENSION_UPDATE_DIAGNOSTICS_FETCH_KEY];
-    if (existing?.wrappedFetch) {
-        return existing;
-    }
-
-    const rawOriginalFetch = globalThis.fetch;
-    if (typeof rawOriginalFetch !== 'function') {
+    if (typeof globalThis.fetch !== 'function') {
         return null;
     }
 
-    const state = {
-        rawOriginalFetch,
-        originalFetch: rawOriginalFetch.bind(globalThis),
-        wrappedFetch: null,
-    };
+    const existing = globalThis[EXTENSION_UPDATE_DIAGNOSTICS_FETCH_KEY];
+    if (existing && hasFetchPipelineSlot('updateDiagnostics')) {
+        return existing;
+    }
+
+    const state = existing && typeof existing === 'object' ? existing : {};
 
     if (!hasUserInteracted() && typeof document !== 'undefined') {
         document.addEventListener('pointerdown', trackUserInteraction, { capture: true, once: true });
         document.addEventListener('keydown', trackUserInteraction, { capture: true, once: true });
     }
 
-    state.wrappedFetch = async function baiBaiToolkitExtensionUpdateDiagnosticsFetch(input, init) {
+    registerFetchPipelineSlot('updateDiagnostics', async function baiBaiToolkitExtensionUpdateDiagnosticsFetch(input, init, nextFetch) {
         const requestUrl = getFetchRequestUrl(input);
         const isExtensionUpdate = typeof requestUrl === 'string'
             && requestUrl.endsWith(EXTENSION_UPDATE_PATH)
             && getFetchRequestMethod(input, init) === 'POST';
         // 只有更新接口才解析 body,普通请求保持零开销。
         const requestInfo = isExtensionUpdate ? await readExtensionUpdateRequestInfo(input, init) : null;
-        const response = await state.originalFetch(input, init);
+        const response = await nextFetch(input, init);
 
         if (requestInfo && response?.status === 500 && !response.headers?.get(EXTENSION_OPS_OP_HEADER)) {
             void (async () => {
@@ -96,13 +92,9 @@ function installExtensionUpdateDiagnosticsFetchHook() {
         }
 
         return response;
-    };
+    });
 
-    state.wrappedFetch[EXTENSION_UPDATE_DIAGNOSTICS_FETCH_KEY] = true;
-    state.wrappedFetch.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
-    state.wrappedFetch.__baiBaiToolkitHookState = state;
     globalThis[EXTENSION_UPDATE_DIAGNOSTICS_FETCH_KEY] = state;
-    globalThis.fetch = state.wrappedFetch;
     return state;
 }
 

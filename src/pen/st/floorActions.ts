@@ -1,12 +1,12 @@
 import {
-  assertChatPersistable,
   expectsHttpChatPersistence,
+  isTargetStillActive,
+  resolveBoundChatTarget,
   runWithObservedChatSave,
+  type BoundChatTarget,
 } from '@pen/st/chatPersistence';
 import {
   getContext,
-  getOpenChatId,
-  getOpenChatIdentity,
   isChatStreaming,
   type STContext,
   type STMessage,
@@ -23,9 +23,7 @@ export interface DeleteFloorsResult {
 }
 
 interface DeleteTargetSnapshot {
-  chatId: string;
-  chatIdentity: string;
-  chatArrayRef: STMessage[];
+  target: BoundChatTarget;
   requestedFloor: number;
   effectiveFloor: number;
   endFloor: number;
@@ -110,13 +108,12 @@ function prepareNativeEditorsBeforeSlashAction(
 }
 
 function captureDeleteSnapshot(context: STContext, floor: number): DeleteTargetSnapshot {
+  const target = resolveBoundChatTarget(context, '', '', '删除楼层');
   const chat = context.chat;
   const effectiveFloor = resolveEffectiveDeleteStartFloor(chat, floor);
   const deleteCount = chat.length - effectiveFloor;
   return {
-    chatId: getOpenChatId(context),
-    chatIdentity: getOpenChatIdentity(context),
-    chatArrayRef: chat,
+    target,
     requestedFloor: floor,
     effectiveFloor,
     endFloor: chat.length - 1,
@@ -131,13 +128,7 @@ function captureDeleteSnapshot(context: STContext, floor: number): DeleteTargetS
 }
 
 function isSameChatTarget(liveContext: STContext, snapshot: DeleteTargetSnapshot): boolean {
-  if (snapshot.chatIdentity) {
-    return getOpenChatIdentity(liveContext) === snapshot.chatIdentity;
-  }
-  if (snapshot.chatId) {
-    return getOpenChatId(liveContext) === snapshot.chatId;
-  }
-  return liveContext.chat === snapshot.chatArrayRef;
+  return isTargetStillActive(snapshot.target, liveContext);
 }
 
 function isSliceUnchanged(liveContext: STContext, snapshot: DeleteTargetSnapshot): boolean {
@@ -197,7 +188,7 @@ export async function toggleFloorHidden(floor: number): Promise<boolean> {
   const message = context?.chat?.[floor];
   if (!context || !message) throw new Error('楼层不存在');
 
-  const { chatId, chatIdentity } = assertChatPersistable(context, '切换楼层隐藏状态');
+  const target = resolveBoundChatTarget(context, '', '', '切换楼层隐藏状态');
   const run = requireSlashRunner(context);
   prepareNativeEditorsBeforeSlashAction(context, floor);
   const willHide = !message.is_system;
@@ -207,8 +198,7 @@ export async function toggleFloorHidden(floor: number): Promise<boolean> {
   try {
     const outcome = await runWithObservedChatSave(
       {
-        expectedChatId: chatId,
-        expectedIdentity: chatIdentity,
+        target,
         requireHttpSave: expectsHttpChatPersistence(context),
       },
       () => {
@@ -222,7 +212,10 @@ export async function toggleFloorHidden(floor: number): Promise<boolean> {
     result = outcome.value;
   } catch (error) {
     if (slashInvoked) {
-      await (getContext() ?? context)?.reloadCurrentChat?.().catch(() => {});
+      const recoveryContext = getContext() ?? context;
+      if (isTargetStillActive(target, recoveryContext)) {
+        await recoveryContext.reloadCurrentChat?.().catch(() => {});
+      }
     }
     throw error;
   }
@@ -232,7 +225,10 @@ export async function toggleFloorHidden(floor: number): Promise<boolean> {
   }
 
   const postContext = getContext() ?? context;
-  if (Boolean(postContext.chat?.[floor]?.is_system) !== willHide) {
+  const targetFloorMessage = isTargetStillActive(target, postContext)
+    ? postContext.chat?.[floor]
+    : target.chatArrayRef?.[floor];
+  if (Boolean(targetFloorMessage?.is_system) !== willHide) {
     throw new Error('楼层隐藏状态未生效，请刷新聊天后重试');
   }
   return willHide;
@@ -250,7 +246,6 @@ export async function deleteFloorsFrom(floor: number): Promise<DeleteFloorsResul
   const initialChat = initialContext?.chat;
   if (!initialContext || !initialChat?.[floor]) throw new Error('楼层不存在');
 
-  assertChatPersistable(initialContext, '删除楼层');
   requireSlashRunner(initialContext);
 
   let snapshot = captureDeleteSnapshot(initialContext, floor);
@@ -292,8 +287,7 @@ export async function deleteFloorsFrom(floor: number): Promise<DeleteFloorsResul
       try {
         const outcome = await runWithObservedChatSave(
           {
-            expectedChatId: snapshot.chatId,
-            expectedIdentity: snapshot.chatIdentity,
+            target: snapshot.target,
             requireHttpSave: expectsHttpChatPersistence(liveContext),
           },
           () => {
@@ -307,7 +301,10 @@ export async function deleteFloorsFrom(floor: number): Promise<DeleteFloorsResul
         result = outcome.value;
       } catch (error) {
         if (slashInvoked) {
-          await (getContext() ?? liveContext)?.reloadCurrentChat?.().catch(() => {});
+          const recoveryContext = getContext() ?? liveContext;
+          if (isTargetStillActive(snapshot.target, recoveryContext)) {
+            await recoveryContext.reloadCurrentChat?.().catch(() => {});
+          }
         }
         throw error;
       }
@@ -317,9 +314,12 @@ export async function deleteFloorsFrom(floor: number): Promise<DeleteFloorsResul
       }
 
       const postContext = getContext() ?? liveContext;
-      if (postContext.chat?.length !== snapshot.effectiveFloor) {
+      const verifiedChat = isTargetStillActive(snapshot.target, postContext)
+        ? postContext.chat
+        : snapshot.target.chatArrayRef;
+      if (verifiedChat?.length !== snapshot.effectiveFloor) {
         throw new Error(
-          `楼层删除结果异常（预期剩余 ${snapshot.effectiveFloor} 层，实际 ${postContext.chat?.length ?? 0} 层）`,
+          `楼层删除结果异常（预期剩余 ${snapshot.effectiveFloor} 层，实际 ${verifiedChat?.length ?? 0} 层）`,
         );
       }
 

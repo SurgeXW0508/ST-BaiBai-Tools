@@ -274,7 +274,7 @@ describe('optional story context', () => {
       filter: filterFn,
     });
 
-    // 初始不存在 2_floating_prompt 时，干跑前挂空占位、结束后彻底移除
+    // 初始不存在 2_floating_prompt 时，干跑前绝不预写空占位污染其它读取者，干跑残留结束后彻底移除
     const emptyPrompts: STContext['extensionPrompts'] = {};
     let sawTempPlaceholder = false;
     contextMocks.getContext.mockReturnValue({
@@ -289,7 +289,7 @@ describe('optional story context', () => {
     });
 
     await collectRewriteStoryContext(0, 'current floor', 0);
-    expect(sawTempPlaceholder).toBe(true);
+    expect(sawTempPlaceholder).toBe(false);
     expect('2_floating_prompt' in emptyPrompts).toBe(false);
 
     // 干跑中途切卡后，绝不把旧卡快照回写覆盖新卡的 extensionPrompts
@@ -310,6 +310,69 @@ describe('optional story context', () => {
 
     await collectRewriteStoryContext(0, 'current floor', 0);
     expect(sharedPrompts['2_floating_prompt']?.value).toBe('B卡自己的新注释');
+
+    // 干跑期间若有外部并发逻辑把 2_floating_prompt 改成了全新注释（非包含原值的 ANTop/ANBottom 拼接），finally 绝不倒退覆盖
+    const concurrentPrompts: STContext['extensionPrompts'] = {
+      '2_floating_prompt': { value: '旧注释', position: 1, depth: 4 },
+    };
+    contextMocks.getContext.mockReturnValue({
+      ...context,
+      getCurrentChatId: () => 'chat-1',
+      extensionPrompts: concurrentPrompts,
+    });
+    contextMocks.getCheckWorldInfo.mockResolvedValue(async () => {
+      concurrentPrompts['2_floating_prompt'] = { value: '用户并发保存的全新注释', position: 1, depth: 2 };
+      return { allActivatedEntries: new Set() };
+    });
+
+    await collectRewriteStoryContext(0, 'current floor', 0);
+    expect(concurrentPrompts['2_floating_prompt']).toEqual({
+      value: '用户并发保存的全新注释',
+      position: 1,
+      depth: 2,
+    });
+
+    // 干跑期间若宿主开始正式流式生成（isChatStreaming 为 true），finally 绝不触碰 extensionPrompts
+    const streamPrompts: STContext['extensionPrompts'] = {
+      '2_floating_prompt': { value: '干跑前注释', position: 1, depth: 4 },
+    };
+    let streamingProcessor: STContext['streamingProcessor'] = null;
+    contextMocks.getContext.mockImplementation(() => ({
+      ...context,
+      getCurrentChatId: () => 'chat-1',
+      streamingProcessor,
+      extensionPrompts: streamPrompts,
+    }));
+    contextMocks.getCheckWorldInfo.mockResolvedValue(async () => {
+      streamingProcessor = { isFinished: false };
+      streamPrompts['2_floating_prompt'] = { value: '正式生成期间注释\n干跑前注释', position: 1, depth: 4 };
+      return { allActivatedEntries: new Set() };
+    });
+
+    await collectRewriteStoryContext(0, 'current floor', 0);
+    expect(streamPrompts['2_floating_prompt']?.value).toBe('正式生成期间注释\n干跑前注释');
+  });
+
+  it('skips checkWorldInfo and getWorldInfoPrompt completely when ST is actively streaming', async () => {
+    const checkSpy = vi.fn(async () => ({ allActivatedEntries: new Set([{ content: '不应触发' }]) }));
+    const promptSpy = vi.fn(async () => ({ worldInfoString: '不应触发' }));
+    contextMocks.getCheckWorldInfo.mockResolvedValue(checkSpy);
+    contextMocks.getContext.mockReturnValue({
+      ...context,
+      getWorldInfoPrompt: promptSpy,
+      streamingProcessor: { isFinished: false },
+    });
+
+    const result = await collectRewriteStoryContext(0, 'current floor', 0, {
+      includeWorldInfo: true,
+      includeCharacterDescription: true,
+      includeUserDescription: false,
+    });
+
+    expect(result.worldInfo).toBe('');
+    expect(result.charCard).toContain('expanded:description');
+    expect(checkSpy).not.toHaveBeenCalled();
+    expect(promptSpy).not.toHaveBeenCalled();
   });
 
   it('prioritizes baibai_exclude_settings over legacy baibai_book exclude lists', async () => {

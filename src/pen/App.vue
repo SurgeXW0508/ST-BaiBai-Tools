@@ -1114,6 +1114,31 @@ const editDirty = computed(() =>
   ),
 );
 
+function isWorkspaceFloorStillOnTargetChat(
+  expectedFloor: number,
+  expectedChatId: string,
+  expectedChatIdentity: string,
+): boolean {
+  if (
+    ui.floor !== expectedFloor ||
+    ui.chatId !== expectedChatId ||
+    (expectedChatIdentity && ui.chatIdentity !== expectedChatIdentity)
+  ) {
+    return false;
+  }
+  const liveContext = getContext();
+  if (!liveContext || !liveContext.chat?.[expectedFloor]) {
+    return false;
+  }
+  if (expectedChatIdentity) {
+    return getOpenChatIdentity(liveContext) === expectedChatIdentity;
+  }
+  if (expectedChatId) {
+    return getOpenChatId(liveContext) === expectedChatId;
+  }
+  return true;
+}
+
 /* 手动保存:只把改过的段落交给 applyParagraphReplacements,未动行的空白/缩进原样保留;
    段落清空即删除该行(与审阅页接受「删除行」同一语义) */
 async function saveManualEdit(): Promise<void> {
@@ -1158,11 +1183,7 @@ async function saveManualEdit(): Promise<void> {
       return;
     }
     // 重开楼层让段落与最新内容对齐;行号可能已变,原有标注由会话重置一并清掉
-    if (
-      ui.floor === floor &&
-      ui.chatId === chatId &&
-      (!chatIdentity || ui.chatIdentity === chatIdentity)
-    ) {
+    if (isWorkspaceFloorStillOnTargetChat(floor, chatId, chatIdentity)) {
       openFloorInPen(floor);
     }
     showToast(hadMarks ? '修改已保存，原有标注已随行号变化重置' : '修改已保存到楼层');
@@ -1258,16 +1279,19 @@ async function finishReview(): Promise<void> {
     return;
   }
   const targetFloor = ui.floor;
+  const targetOriginalText = ui.originalText;
+  const targetChatId = ui.chatId;
+  const targetChatIdentity = ui.chatIdentity;
 
   generationError.value = '';
   saving.value = true;
   try {
     const result = await applyFloorText(
       targetFloor,
-      ui.originalText,
+      targetOriginalText,
       nextText,
-      ui.chatId,
-      ui.chatIdentity,
+      targetChatId,
+      targetChatIdentity,
     );
     if (result === 'chat-changed') {
       const msg = '当前聊天已经切换，不能应用结果（审阅内容已保留）';
@@ -1287,7 +1311,13 @@ async function finishReview(): Promise<void> {
       showToast(msg);
       return;
     }
-    closePen();
+    if (
+      ui.floor === targetFloor &&
+      ui.chatId === targetChatId &&
+      (!targetChatIdentity || ui.chatIdentity === targetChatIdentity)
+    ) {
+      closePen();
+    }
     toastr?.info?.(`改写结果已保存到楼层 #${targetFloor}`, '柏宝砚');
   } catch (error) {
     const msg = error instanceof Error ? error.message : '保存楼层失败';
@@ -1498,11 +1528,7 @@ async function applyReplacement(result: ReplacementResult): Promise<void> {
       return;
     }
 
-    if (
-      ui.floor === floor &&
-      ui.chatId === chatId &&
-      (!chatIdentity || ui.chatIdentity === chatIdentity)
-    ) {
+    if (isWorkspaceFloorStillOnTargetChat(floor, chatId, chatIdentity)) {
       openFloorInPen(floor);
     }
     showToast(`已替换 ${result.count} 处`);

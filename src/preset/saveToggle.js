@@ -7,6 +7,9 @@ import { LOG_PREFIX, extensionState, settings } from './state.js';
 import { updatePresetEffectiveTokenHeaderDisplay } from './switchFast.js';
 import { isPresetGroupingEnabled } from './util.js';
 import { isPresetVuePromptListManagerActive, markPresetVuePromptListSyncSignatureCurrent } from './vueList.js';
+import { registerFetchPipelineSlot, unregisterFetchPipelineSlot } from '../features/fetchPipeline.js';
+
+let presetSaveToggleWaiterSeq = 0;
 
 function applyPresetToggleOptimization() {
     if (!extensionState[PRESET_TOGGLE_HANDLER_KEY]) {
@@ -157,16 +160,14 @@ function waitForOpenAiPresetUpdateRequest(presetName) {
         return waitForOpenAiPresetUpdateFallback();
     }
 
-    const originalFetch = globalThis.fetch;
+    const slotId = `presetSaveToggle:${++presetSaveToggleWaiterSeq}`;
     let captured = false;
     let settled = false;
     let timeout = 0;
 
     return new Promise((resolve, reject) => {
         const cleanup = () => {
-            if (globalThis.fetch === patchedFetch) {
-                globalThis.fetch = originalFetch;
-            }
+            unregisterFetchPipelineSlot(slotId);
 
             if (timeout) {
                 clearTimeout(timeout);
@@ -184,10 +185,10 @@ function waitForOpenAiPresetUpdateRequest(presetName) {
             handler(value);
         };
 
-        const patchedFetch = function (...args) {
-            const result = originalFetch.apply(this, args);
+        registerFetchPipelineSlot(slotId, function baiBaiToolkitPresetSaveToggleWaiter(input, init, nextFetch) {
+            const result = nextFetch(input, init);
 
-            if (!captured && isOpenAiPresetSaveRequest(args[0], args[1], presetName)) {
+            if (!captured && isOpenAiPresetSaveRequest(input, init, presetName)) {
                 captured = true;
                 Promise.resolve(result)
                     .then(response => {
@@ -202,9 +203,8 @@ function waitForOpenAiPresetUpdateRequest(presetName) {
             }
 
             return result;
-        };
+        });
 
-        globalThis.fetch = patchedFetch;
         timeout = setTimeout(() => settle(resolve, false), 1200);
     });
 }

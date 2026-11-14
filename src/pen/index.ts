@@ -7,6 +7,7 @@ import { initializeSharedChannels, teardownSharedChannels } from '@pen/api/share
 import { bindEditButtons, unbindEditButtons } from '@pen/editButton';
 import { openPenFromMenu } from '@pen/menu';
 import { closePen, resetPenUiState, ui } from '@pen/state/ui';
+import { teardownChatSaveObserver } from '@pen/st/chatPersistence';
 import { guardEditableArrowKeys } from '@pen/st/keyboard';
 import { versionedAssetUrl } from '@pen/version';
 import '@pen/styles/base.css';
@@ -79,6 +80,7 @@ export function stopPen(): void {
   startRunId += 1;
   mountWatchStop?.();
   mountWatchStop = null;
+  teardownChatSaveObserver();
   teardownSharedChannels();
   teardownPenSettings();
   unbindEditButtons();

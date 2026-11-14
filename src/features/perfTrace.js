@@ -3,7 +3,8 @@ import * as scriptModule from '@sillytavern/script';
 import { eventSource, getCurrentChatId } from '@sillytavern/script';
 import { power_user } from '@sillytavern/scripts/power-user';
 import { PERFORMANCE_TRACE_DEDUPE_MS, PERFORMANCE_TRACE_EVENTS, PERFORMANCE_TRACE_FETCH_KEY, PERFORMANCE_TRACE_FETCH_PATHS, PERFORMANCE_TRACE_INTERACTION_SELECTOR, PERFORMANCE_TRACE_LISTENER_LOG_MS, PERFORMANCE_TRACE_MAX_LINES, PERFORMANCE_TRACE_MAX_LINE_LENGTH, PERFORMANCE_TRACE_SLOW_MS } from './constants.js';
-import { buildFetchHeaders, getFetchRequestMethod, getFetchRequestUrl, isFetchWrapperInChain, spliceFetchWrapperOut } from './gzipHook.js';
+import { hasFetchPipelineSlot, registerFetchPipelineSlot, unregisterFetchPipelineSlot } from './fetchPipeline.js';
+import { buildFetchHeaders, getFetchRequestMethod, getFetchRequestUrl } from './gzipHook.js';
 import { extensionState, settings } from './state.js';
 
 function getPerformanceTraceState() {
@@ -274,40 +275,38 @@ function installPerformanceTraceInteractionListeners(state) {
 }
 
 function installPerformanceTraceFetchHook() {
+    if (typeof globalThis.fetch !== 'function') {
+        return null;
+    }
+
     const existing = globalThis[PERFORMANCE_TRACE_FETCH_KEY];
-    if (existing?.wrappedFetch && isFetchWrapperInChain(globalThis.fetch, existing.wrappedFetch)) {
+    if (existing && hasFetchPipelineSlot('perfTrace')) {
         existing.disabled = false;
         return existing;
     }
 
-    const rawOriginalFetch = globalThis.fetch;
-    if (typeof rawOriginalFetch !== 'function') {
-        return null;
-    }
+    const state = existing && typeof existing === 'object'
+        ? existing
+        : { disabled: false };
 
-    const state = {
-        rawOriginalFetch,
-        originalFetch: rawOriginalFetch.bind(globalThis),
-        wrappedFetch: null,
-        disabled: false,
-    };
+    state.disabled = false;
 
-    state.wrappedFetch = async function baiBaiToolkitPerformanceTraceFetch(input, init) {
+    registerFetchPipelineSlot('perfTrace', async function baiBaiToolkitPerformanceTraceFetch(input, init, nextFetch) {
         if (state.disabled) {
-            return state.originalFetch(input, init);
+            return nextFetch(input, init);
         }
         const traceState = getPerformanceTraceState();
         const info = traceState.active ? getPerformanceTraceFetchInfo(input, init) : null;
 
         if (!info) {
-            return state.originalFetch(input, init);
+            return nextFetch(input, init);
         }
 
         const start = performance.now();
         recordPerformanceTraceFetchStart(info);
 
         try {
-            const response = await state.originalFetch(input, init);
+            const response = await nextFetch(input, init);
             const duration = performance.now() - start;
             traceState.responseInfo?.set(response, {
                 ...info,
@@ -320,27 +319,20 @@ function installPerformanceTraceFetchHook() {
             recordPerformanceTraceFetchError(info, duration, error);
             throw error;
         }
-    };
+    });
 
-    state.wrappedFetch[PERFORMANCE_TRACE_FETCH_KEY] = true;
-    state.wrappedFetch.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
-    state.wrappedFetch.__baiBaiToolkitHookState = state;
     globalThis[PERFORMANCE_TRACE_FETCH_KEY] = state;
-    globalThis.fetch = state.wrappedFetch;
     return state;
 }
 
 function disablePerformanceTraceFetchHook() {
     const existing = globalThis[PERFORMANCE_TRACE_FETCH_KEY];
-    if (!existing?.wrappedFetch) {
-        return false;
+    if (existing && typeof existing === 'object') {
+        existing.disabled = true;
     }
-    existing.disabled = true;
-    const spliced = spliceFetchWrapperOut(existing.wrappedFetch, existing.rawOriginalFetch);
-    if (spliced || !isFetchWrapperInChain(globalThis.fetch, existing.wrappedFetch)) {
-        delete globalThis[PERFORMANCE_TRACE_FETCH_KEY];
-    }
-    return spliced;
+    const removed = unregisterFetchPipelineSlot('perfTrace');
+    delete globalThis[PERFORMANCE_TRACE_FETCH_KEY];
+    return removed;
 }
 
 function syncPerformanceTraceFetchHook() {

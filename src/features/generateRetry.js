@@ -4,84 +4,45 @@
 import { event_types, eventSource } from '@sillytavern/script';
 import { GENERATION_REQUEST_ID_KEY, createGenerationRequestId, getGenerationRequestId, markGenerationRequest, stripGenerationRequestId } from './generateRequest.js';
 import { BAIBAOKU_SAVE_GENERATE_URL, GENERATE_RETRY_BASE_DELAY_MS, GENERATE_RETRY_DEFAULT_RETRIES, GENERATE_RETRY_FETCH_KEY, GENERATE_RETRY_MAX_DELAY_MS, GENERATE_RETRY_MAX_RETRIES, GENERATE_RETRY_MESSAGE_TYPES, GENERATE_RETRY_MIN_RETRIES, GENERATE_RETRY_PATHS, GENERATE_RETRY_PERMANENT_STATUSES, GENERATE_RETRY_REASON_MAX_LENGTH, LOG_PREFIX } from './constants.js';
+import { hasFetchPipelineSlot, registerFetchPipelineSlot, unregisterFetchPipelineSlot } from './fetchPipeline.js';
 import { getFetchRequestMethod, getFetchRequestUrl, isFetchRequest } from './gzipHook.js';
 import { getGenerationStopEpoch, isCurrentGenerationStopped, subscribeGenerationStop } from './generationLifecycle.js';
 import { extensionState, settings } from './state.js';
 import { readFetchJsonBody } from './util.js';
 
-function isFetchWrapperInChain(root, target) {
-    if (typeof root !== 'function' || typeof target !== 'function') {
-        return false;
-    }
-    const visited = new Set();
-    let cursor = root;
-    while (typeof cursor === 'function' && !visited.has(cursor)) {
-        if (cursor === target) {
-            return true;
-        }
-        visited.add(cursor);
-        cursor = cursor.__baiBaiToolkitOriginalFetch;
-    }
-    return false;
-}
-
-function spliceFetchWrapperOut(wrappedFetch, rawOriginalFetch) {
-    if (typeof wrappedFetch !== 'function' || typeof rawOriginalFetch !== 'function') {
-        return false;
-    }
-    if (globalThis.fetch === wrappedFetch) {
-        globalThis.fetch = rawOriginalFetch;
-        return true;
-    }
-    const visited = new Set();
-    let cursor = globalThis.fetch;
-    while (typeof cursor === 'function' && !visited.has(cursor)) {
-        visited.add(cursor);
-        if (cursor.__baiBaiToolkitOriginalFetch === wrappedFetch) {
-            cursor.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
-            if (cursor.__baiBaiToolkitHookState && typeof cursor.__baiBaiToolkitHookState === 'object') {
-                cursor.__baiBaiToolkitHookState.rawOriginalFetch = rawOriginalFetch;
-                cursor.__baiBaiToolkitHookState.originalFetch = rawOriginalFetch.bind(globalThis);
-            }
-            return true;
-        }
-        cursor = cursor.__baiBaiToolkitOriginalFetch;
-    }
-    return false;
-}
-
 function installGenerateRetryFetchHook() {
+    if (typeof globalThis.fetch !== 'function') {
+        return null;
+    }
+
     const existing = globalThis[GENERATE_RETRY_FETCH_KEY];
-    if (existing?.wrappedFetch && isFetchWrapperInChain(globalThis.fetch, existing.wrappedFetch)) {
+    if (existing && hasFetchPipelineSlot('generateRetry')) {
         existing.disabled = false;
         existing.isEnabled = () => settings.generateRetryEnabled === true;
         installGenerateRetryEventHandlers(existing);
         return existing;
     }
 
-    const rawOriginalFetch = globalThis.fetch;
-    if (typeof rawOriginalFetch !== 'function') {
-        return null;
-    }
+    const state = existing && typeof existing === 'object'
+        ? existing
+        : {
+            nativeWindow: null,
+            disabled: false,
+            eventHandlersInstalled: false,
+            eventHandlers: [],
+            isEnabled: () => settings.generateRetryEnabled === true,
+        };
 
-    const state = {
-        rawOriginalFetch,
-        originalFetch: rawOriginalFetch.bind(globalThis),
-        wrappedFetch: null,
-        nativeWindow: null,
-        disabled: false,
-        eventHandlersInstalled: false,
-        eventHandlers: [],
-        isEnabled: () => settings.generateRetryEnabled === true,
-    };
+    state.disabled = false;
+    state.isEnabled = () => settings.generateRetryEnabled === true;
 
-    state.wrappedFetch = async function baiBaiToolkitGenerateRetryFetch(input, init) {
+    registerFetchPipelineSlot('generateRetry', async function baiBaiToolkitGenerateRetryFetch(input, init, nextFetch) {
         const kind = getGenerateRetryRequestKind(input, init);
-        if (!kind) return state.originalFetch(input, init);
+        if (!kind) return nextFetch(input, init);
 
         if (!isFetchRequest(input)
             && (init?.body == null || (typeof init.body === 'string' && !init.body.includes(GENERATION_REQUEST_ID_KEY)))) {
-            return state.originalFetch(input, init);
+            return nextFetch(input, init);
         }
 
         const payload = await readFetchJsonBody(input, init);
@@ -93,15 +54,11 @@ function installGenerateRetryFetchHook() {
         if (clean !== body) {
             init = { ...(init || {}), body: JSON.stringify(kind === 'save-generate' ? { ...payload, generate: clean } : clean) };
         }
-        if (state.disabled || !request || isFetchRequest(input)) return state.originalFetch(input, init);
-        return runGenerateRetryRequest(state, request, input, init);
-    };
+        if (state.disabled || !request || isFetchRequest(input)) return nextFetch(input, init);
+        return runGenerateRetryRequest(state, request, input, init, nextFetch);
+    });
 
-    state.wrappedFetch[GENERATE_RETRY_FETCH_KEY] = true;
-    state.wrappedFetch.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
-    state.wrappedFetch.__baiBaiToolkitHookState = state;
     globalThis[GENERATE_RETRY_FETCH_KEY] = state;
-    globalThis.fetch = state.wrappedFetch;
     installGenerateRetryEventHandlers(state);
     return state;
 }
@@ -124,17 +81,14 @@ function uninstallGenerateRetryEventHandlers(state) {
 
 function disableGenerateRetryFetchHook() {
     const existing = globalThis[GENERATE_RETRY_FETCH_KEY];
-    if (!existing?.wrappedFetch) {
-        return false;
+    if (existing && typeof existing === 'object') {
+        existing.disabled = true;
+        closeGenerateRetryWindow(existing);
+        uninstallGenerateRetryEventHandlers(existing);
     }
-    existing.disabled = true;
-    closeGenerateRetryWindow(existing);
-    uninstallGenerateRetryEventHandlers(existing);
-    const spliced = spliceFetchWrapperOut(existing.wrappedFetch, existing.rawOriginalFetch);
-    if (spliced || !isFetchWrapperInChain(globalThis.fetch, existing.wrappedFetch)) {
-        delete globalThis[GENERATE_RETRY_FETCH_KEY];
-    }
-    return spliced;
+    const removed = unregisterFetchPipelineSlot('generateRetry');
+    delete globalThis[GENERATE_RETRY_FETCH_KEY];
+    return removed;
 }
 
 function syncGenerateRetryFetchHook() {
@@ -266,7 +220,7 @@ function getGenerateRetryRequestKind(input, init) {
     }
 }
 
-async function runGenerateRetryRequest(state, request, input, init) {
+async function runGenerateRetryRequest(state, request, input, init, nextFetch) {
     // A blacklist chain survives native regenerate calls. Both retry reasons
     // spend its counter instead of granting every new request a fresh allowance.
     const activeRun = extensionState.generateBlacklistRetry?.run;
@@ -279,7 +233,7 @@ async function runGenerateRetryRequest(state, request, input, init) {
 
         let response = null;
         try {
-            response = await state.originalFetch(input, init);
+            response = await nextFetch(input, init);
         } catch (error) {
             if (isFinalAttempt || !request.retryOnNetworkError || isGenerateRetryAborted(request, error)) {
                 throw error;

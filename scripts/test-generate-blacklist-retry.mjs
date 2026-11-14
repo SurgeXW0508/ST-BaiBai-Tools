@@ -10,7 +10,29 @@ const GENERATE_BLACKLIST_SETTLED_EVENT = 'bai_bai_toolkit_blacklist_settled';
 
 // Exercise the real modules with isolated ST imports, without a browser, server,
 // real chats, or paid generation requests.
-async function loadModule(file, context, mocks) {
+const fetchPipelineModuleCache = new WeakMap();
+
+async function getFetchPipelineVmModule(context) {
+    let cached = fetchPipelineModuleCache.get(context);
+    if (!cached) {
+        cached = (async () => {
+            const pipelineCode = await readFile(new URL('../src/features/fetchPipeline.js', import.meta.url), 'utf8');
+            const pipelineMod = new vm.SourceTextModule(pipelineCode, {
+                context,
+                identifier: 'fetchPipeline.js',
+            });
+            await pipelineMod.link(specifier => {
+                throw new Error(`Unexpected import in fetchPipeline.js: ${specifier}`);
+            });
+            await pipelineMod.evaluate();
+            return pipelineMod;
+        })();
+        fetchPipelineModuleCache.set(context, cached);
+    }
+    return cached;
+}
+
+async function loadModule(file, context, mocks = {}) {
     const code = await readFile(new URL(`../src/features/${file}`, import.meta.url), 'utf8');
     const imports = parse(code, { ecmaVersion: 'latest', sourceType: 'module' }).body
         .filter(node => node.type === 'ImportDeclaration');
@@ -20,8 +42,12 @@ async function loadModule(file, context, mocks) {
         identifier: file,
         initializeImportMeta: meta => { meta.url = new URL(`../src/features/${file}`, import.meta.url).href; },
     });
-    await module.link(source => {
+    await module.link(async source => {
         if (!dependencies.has(source)) {
+            if (!(source in mocks) && (source === './fetchPipeline.js' || source.endsWith('/fetchPipeline.js'))) {
+                dependencies.set(source, await getFetchPipelineVmModule(context));
+                return dependencies.get(source);
+            }
             const values = mocks[source] || {};
             const names = new Set(Object.keys(values));
             for (const entry of imports.filter(entry => entry.source.value === source)) {

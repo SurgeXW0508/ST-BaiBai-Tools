@@ -3,8 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ensureChatSaveFetchObserver,
   runWithObservedChatSave,
+  teardownChatSaveObserver,
 } from '@pen/st/chatPersistence';
 import type { STContext } from '@pen/st/context';
+import { hasFetchPipelineSlot } from '../../features/fetchPipeline.js';
 
 function installContext(context: Partial<STContext>): void {
   vi.stubGlobal('window', {
@@ -28,35 +30,96 @@ async function gzipString(text: string): Promise<Uint8Array> {
 }
 
 afterEach(() => {
+  teardownChatSaveObserver();
   vi.unstubAllGlobals();
 });
 
-describe('P-4：chatPersistence 幂等链式安装、派发保序与压缩/二进制请求体解析', () => {
-  it('外层再挂载其他 fetch 包装器时绝不重复包裹第二层，而测试替换全新 fetch 时仍能正常重装', () => {
+describe('P-4 / WP-1：chatPersistence 按需管道挂载、严格会话归属与压缩请求体解析', () => {
+  it('无活跃观察作用域时不包裹 globalThis.fetch；作用域期间按需挂载、保留外层包装并在结束或 teardown 时彻底卸载', async () => {
     const baseFetch = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
     vi.stubGlobal('fetch', baseFetch);
 
+    // 1. 空闲状态下调用 ensureChatSaveFetchObserver 绝不包裹 globalThis.fetch
     ensureChatSaveFetchObserver();
-    const firstObserved = globalThis.fetch;
-    expect(firstObserved).not.toBe(baseFetch);
+    expect(globalThis.fetch).toBe(baseFetch);
+    expect(hasFetchPipelineSlot('chatSaveObserver')).toBe(false);
 
-    // 模拟其它模块在 observed 之上再包一层并挂接 __baiBaiToolkitOriginalFetch
-    const outerWrapper = Object.assign(
-      function outer(input: RequestInfo | URL, init?: RequestInit) {
-        return firstObserved(input, init);
+    installContext({
+      characterId: 0,
+      characters: [{ name: 'Alice', avatar: 'alice.png', chat: 'chat-a' }],
+      getCurrentChatId: () => 'chat-a',
+    });
+
+    // 2. 进入观察作用域时挂载管道，支持外层包装共存，结束后无其它槽位时自动还原 baseFetch
+    await runWithObservedChatSave(
+      {
+        expectedChatId: 'chat-a',
+        expectedIdentity: 'character:alice.png\u0000chat-a',
+        requireHttpSave: true,
       },
-      { __baiBaiToolkitOriginalFetch: firstObserved },
+      async () => {
+        const dispatcher = globalThis.fetch;
+        expect(dispatcher).not.toBe(baseFetch);
+        expect(hasFetchPipelineSlot('chatSaveObserver')).toBe(true);
+
+        const outerWrapper = Object.assign(
+          function outer(input: RequestInfo | URL, init?: RequestInit) {
+            return (outerWrapper as unknown as { __baiBaiToolkitOriginalFetch: typeof fetch }).__baiBaiToolkitOriginalFetch(
+              input,
+              init,
+            );
+          },
+          { __baiBaiToolkitOriginalFetch: dispatcher },
+        );
+        globalThis.fetch = outerWrapper as unknown as typeof fetch;
+
+        ensureChatSaveFetchObserver();
+        expect(globalThis.fetch).toBe(outerWrapper);
+
+        await fetch('/api/chats/save', {
+          method: 'POST',
+          body: JSON.stringify({ avatar_url: 'alice.png', file_name: 'chat-a', chat: [] }),
+        });
+
+        // 卸载验证前去掉外层手工包装测试：外层仍保留且 __baiBaiToolkitOriginalFetch 会在作用域退出时缝合回 baseFetch
+        expect(
+          (outerWrapper as unknown as { __baiBaiToolkitOriginalFetch: typeof fetch }).__baiBaiToolkitOriginalFetch,
+        ).toBe(dispatcher);
+      },
     );
-    globalThis.fetch = outerWrapper as typeof fetch;
 
-    ensureChatSaveFetchObserver();
-    expect(globalThis.fetch).toBe(outerWrapper);
+    expect(hasFetchPipelineSlot('chatSaveObserver')).toBe(false);
+    expect(
+      (globalThis.fetch as unknown as { __baiBaiToolkitOriginalFetch: typeof fetch }).__baiBaiToolkitOriginalFetch,
+    ).toBe(baseFetch);
 
-    // 测试中用全新 mock 完全替换 globalThis.fetch 时，能够重新挂载
+    // 3. 测试中用全新 mock 完全替换 globalThis.fetch 时，新观察作用域能够重新锚定并在 teardownChatSaveObserver 时立即卸载
     const freshMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
     vi.stubGlobal('fetch', freshMock);
-    ensureChatSaveFetchObserver();
-    expect(globalThis.fetch).not.toBe(freshMock);
+
+    let releaseAction!: () => void;
+    const actionGate = new Promise<void>(resolve => {
+      releaseAction = resolve;
+    });
+
+    const running = runWithObservedChatSave(
+      {
+        expectedChatId: 'chat-a',
+        expectedIdentity: 'character:alice.png\u0000chat-a',
+        requireHttpSave: false,
+      },
+      async () => {
+        expect(globalThis.fetch).not.toBe(freshMock);
+        expect(hasFetchPipelineSlot('chatSaveObserver')).toBe(true);
+        teardownChatSaveObserver();
+        expect(hasFetchPipelineSlot('chatSaveObserver')).toBe(false);
+        expect(globalThis.fetch).toBe(freshMock);
+        releaseAction();
+      },
+    );
+
+    await running;
+    expect(globalThis.fetch).toBe(freshMock);
   });
 
   it('异步请求体乱序解析完成时，仍严格按请求派发顺序判定最终保存结果', async () => {
@@ -86,7 +149,9 @@ describe('P-4：chatPersistence 幂等链式安装、派发保序与压缩/二�
     const slowFirstBlob = {
       async arrayBuffer() {
         await firstBodyGate;
-        return new TextEncoder().encode(JSON.stringify({ file_name: 'chat-order' })).buffer;
+        return new TextEncoder().encode(
+          JSON.stringify({ avatar_url: 'alice.png', file_name: 'chat-order' }),
+        ).buffer;
       },
     } as unknown as Blob;
     Object.setPrototypeOf(slowFirstBlob, Blob.prototype);
@@ -102,7 +167,7 @@ describe('P-4：chatPersistence 幂等链式安装、派发保序与压缩/二�
           await fetch('/api/chats/save', { method: 'POST', body: slowFirstBlob });
           await fetch('/api/chats/save', {
             method: 'POST',
-            body: JSON.stringify({ file_name: 'chat-order', force: true }),
+            body: JSON.stringify({ avatar_url: 'alice.png', file_name: 'chat-order', force: true }),
           });
           releaseFirstBody();
         },
@@ -132,7 +197,9 @@ describe('P-4：chatPersistence 幂等链式安装、派发保序与压缩/二�
     });
 
     // 1. 仅收到其他会话 ('other-chat') 的 gzip 保存请求时，不应误判为当前会话已落盘
-    const otherGzipped = await gzipString(JSON.stringify({ file_name: 'other-chat', chat: [] }));
+    const otherGzipped = await gzipString(
+      JSON.stringify({ avatar_url: 'alice.png', file_name: 'other-chat', chat: [] }),
+    );
     await expect(
       runWithObservedChatSave(
         {
@@ -152,7 +219,7 @@ describe('P-4：chatPersistence 幂等链式安装、派发保序与压缩/二�
 
     // 2. 当前会话以 gzip 压缩体或 Request 实例发送时，准确匹配并通过落盘校验
     const targetGzipped = await gzipString(
-      JSON.stringify({ file_name: 'chat-gz.jsonl', chat: [] }),
+      JSON.stringify({ avatar_url: 'alice.png', file_name: 'chat-gz.jsonl', chat: [] }),
     );
     await expect(
       runWithObservedChatSave(
@@ -194,5 +261,70 @@ describe('P-4：chatPersistence 幂等链式安装、派发保序与压缩/二�
       ),
     ).resolves.toMatchObject({ observedHttpSave: true });
     expect(receivedBodies.at(-1)).toBe(JSON.stringify({ id: 'grp-chat-1', chat: [] }));
+  });
+
+  it('同名聊天文件 main 在不同角色卡之间严格隔离，缺少/损坏请求体绝不回退 liveIdentity，且 action 返回 false 时强制失败', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })),
+    );
+
+    installContext({
+      characterId: 0,
+      characters: [
+        { name: 'Alice', avatar: 'alice.png', chat: 'main' },
+        { name: 'Bob', avatar: 'bob.png', chat: 'main' },
+      ],
+      getCurrentChatId: () => 'main',
+    });
+
+    // 1. 角色 B (bob.png) 保存同名 file_name='main' 返回 200 OK 时，绝不能记到角色 A (alice.png) 账上
+    await expect(
+      runWithObservedChatSave(
+        {
+          expectedChatId: 'main',
+          expectedIdentity: 'character:alice.png\u0000main',
+          requireHttpSave: true,
+        },
+        async () => {
+          await fetch('/api/chats/save', {
+            method: 'POST',
+            body: JSON.stringify({ avatar_url: 'bob.png', ch_name: 'Bob', file_name: 'main', chat: [] }),
+          });
+        },
+      ),
+    ).rejects.toThrow('未触发落盘请求');
+
+    // 2. 请求体缺失或非 JSON 时，绝不回退 liveIdentity 假阳性放行
+    await expect(
+      runWithObservedChatSave(
+        {
+          expectedChatId: 'main',
+          expectedIdentity: 'character:alice.png\u0000main',
+          requireHttpSave: true,
+        },
+        async () => {
+          await fetch('/api/chats/save', { method: 'POST', body: '{broken-json' });
+        },
+      ),
+    ).rejects.toThrow('未触发落盘请求');
+
+    // 3. 即便等待锁期间前序同会话保存返回了 200 OK，只要本次 saveChatConditional 因切卡守卫返回 false，必须判定本次保存失败
+    await expect(
+      runWithObservedChatSave(
+        {
+          expectedChatId: 'main',
+          expectedIdentity: 'character:alice.png\u0000main',
+          requireHttpSave: true,
+        },
+        async () => {
+          await fetch('/api/chats/save', {
+            method: 'POST',
+            body: JSON.stringify({ avatar_url: 'alice.png', ch_name: 'Alice', file_name: 'main', chat: [] }),
+          });
+          return false;
+        },
+      ),
+    ).rejects.toThrow('聊天保存未完成');
   });
 });

@@ -3,6 +3,7 @@ import {
   getContext,
   getEjsTemplate,
   getOpenChatIdentity,
+  isChatStreaming,
   type STExtensionPromptDescriptor,
   type STMessage,
   type WorldInfoEntry,
@@ -279,10 +280,69 @@ async function renderWorldInfoContent(
   return text;
 }
 
+function shouldRestoreAuthorNoteSlot(
+  hadKey: boolean,
+  previousRef: STExtensionPromptDescriptor | undefined,
+  snapshot: STExtensionPromptDescriptor | undefined,
+  currentRef: STExtensionPromptDescriptor | undefined,
+  taskCompleted: boolean,
+  taskResult: unknown,
+): boolean {
+  if (currentRef === previousRef) {
+    if (!hadKey) return false;
+    if (!previousRef || typeof previousRef !== 'object') return false;
+    return previousRef.value !== snapshot?.value;
+  }
+
+  // checkWorldInfo 仅在返回前最后一步同步调用 setExtensionPrompt；若中途抛错，新对象必来自外部并发流程。
+  if (!taskCompleted) return false;
+
+  const resultRecord =
+    taskResult && typeof taskResult === 'object'
+      ? (taskResult as {
+          ANBeforeEntries?: unknown;
+          ANAfterEntries?: unknown;
+          anBefore?: unknown;
+          anAfter?: unknown;
+        })
+      : null;
+  const rawAnTop = Array.isArray(resultRecord?.ANBeforeEntries)
+    ? resultRecord.ANBeforeEntries
+    : Array.isArray(resultRecord?.anBefore)
+      ? resultRecord.anBefore
+      : null;
+  const rawAnBottom = Array.isArray(resultRecord?.ANAfterEntries)
+    ? resultRecord.ANAfterEntries
+    : Array.isArray(resultRecord?.anAfter)
+      ? resultRecord.anAfter
+      : null;
+
+  if (rawAnTop !== null || rawAnBottom !== null) {
+    const anTop = (rawAnTop ?? []).filter((item): item is string => typeof item === 'string');
+    const anBottom = (rawAnBottom ?? []).filter((item): item is string => typeof item === 'string');
+    const baseValue = typeof snapshot?.value === 'string' ? snapshot.value : '';
+    const expectedDryRunValue = `${anTop.join('\n')}\n${baseValue}\n${anBottom.join('\n')}`.replace(
+      /(^\n)|(\n$)/g,
+      '',
+    );
+    return typeof currentRef?.value === 'string' && currentRef.value === expectedDryRunValue;
+  }
+
+  if (hadKey) {
+    const baseValue = typeof snapshot?.value === 'string' ? snapshot.value : '';
+    if (baseValue) {
+      return typeof currentRef?.value === 'string' && currentRef.value.includes(baseValue);
+    }
+    return currentRef !== undefined;
+  }
+
+  return currentRef !== undefined;
+}
+
 /**
  * 酒馆 `checkWorldInfo(..., isDryRun=true)` 虽不持久化 sticky/cooldown，但命中 ANTop/ANBottom 条目时
- * 仍会调用 `setExtensionPrompt('2_floating_prompt', ...)` 原地改写当前会话的作者注释提示词槽位。
- * 在干跑前后快照并还原该槽位，避免多次改写预览污染后续正常聊天生成。
+ * 仍会调用 `setExtensionPrompt('2_floating_prompt', ...)` 改写当前会话的作者注释提示词槽位。
+ * 干跑前不再预写临时占位对象；结束时仅在同聊天身份、非流式生成且槽位未被并发外部流程改写为无关新值时还原。
  */
 async function withIsolatedAuthorNotePrompt<T>(task: () => Promise<T>): Promise<T> {
   const startContext = getContext();
@@ -293,31 +353,42 @@ async function withIsolatedAuthorNotePrompt<T>(task: () => Promise<T>): Promise<
 
   const startIdentity = getOpenChatIdentity(startContext);
   const hadKey = Object.prototype.hasOwnProperty.call(prompts, AUTHOR_NOTE_EXTENSION_KEY);
-  const previous = prompts[AUTHOR_NOTE_EXTENSION_KEY];
+  const previousRef = prompts[AUTHOR_NOTE_EXTENSION_KEY];
   const snapshot: STExtensionPromptDescriptor | undefined =
-    previous && typeof previous === 'object' ? { ...previous } : previous;
-  if (!hadKey) {
-    prompts[AUTHOR_NOTE_EXTENSION_KEY] = {
-      value: '',
-      position: 1,
-      depth: 4,
-      scan: false,
-      role: 0,
-    };
-  }
+    previousRef && typeof previousRef === 'object' ? { ...previousRef } : previousRef;
 
+  let taskCompleted = false;
+  let taskResult: unknown;
   try {
-    return await task();
+    const result = await task();
+    taskCompleted = true;
+    taskResult = result;
+    return result;
   } finally {
     const liveContext = getContext();
-    if (getOpenChatIdentity(liveContext) === startIdentity) {
-      const livePrompts = liveContext?.extensionPrompts ?? prompts;
-      if (livePrompts && typeof livePrompts === 'object') {
-        if (hadKey) {
-          livePrompts[AUTHOR_NOTE_EXTENSION_KEY] =
-            snapshot && typeof snapshot === 'object' ? { ...snapshot } : snapshot;
-        } else {
-          delete livePrompts[AUTHOR_NOTE_EXTENSION_KEY];
+    if (
+      !isChatStreaming(liveContext) &&
+      getOpenChatIdentity(liveContext) === startIdentity
+    ) {
+      const livePrompts = liveContext?.extensionPrompts;
+      if (livePrompts === prompts) {
+        const currentRef = livePrompts[AUTHOR_NOTE_EXTENSION_KEY];
+        if (
+          shouldRestoreAuthorNoteSlot(
+            hadKey,
+            previousRef,
+            snapshot,
+            currentRef,
+            taskCompleted,
+            taskResult,
+          )
+        ) {
+          if (hadKey) {
+            livePrompts[AUTHOR_NOTE_EXTENSION_KEY] =
+              snapshot && typeof snapshot === 'object' ? { ...snapshot } : snapshot;
+          } else {
+            delete livePrompts[AUTHOR_NOTE_EXTENSION_KEY];
+          }
         }
       }
     }
@@ -325,7 +396,9 @@ async function withIsolatedAuthorNotePrompt<T>(task: () => Promise<T>): Promise<
 }
 
 async function fetchWorldInfoViaPrompt(scanText: string[], floor: number): Promise<string> {
-  const prompt = getContext()?.getWorldInfoPrompt;
+  const context = getContext();
+  if (isChatStreaming(context)) return '';
+  const prompt = context?.getWorldInfoPrompt;
   if (typeof prompt !== 'function') return '';
   const result = await withIsolatedAuthorNotePrompt(() =>
     prompt(scanText, HUGE_WORLD_INFO_CONTEXT, true),
@@ -346,8 +419,10 @@ async function fetchWorldInfoViaPrompt(scanText: string[], floor: number): Promi
 
 async function fetchWorldInfo(scanText: string[], floor: number): Promise<string> {
   if (!scanText.length) return '';
+  if (isChatStreaming(getContext())) return '';
   try {
     const checkWorldInfo = await getCheckWorldInfo();
+    if (isChatStreaming(getContext())) return '';
     if (!checkWorldInfo) return await fetchWorldInfoViaPrompt(scanText, floor);
     const result = await withIsolatedAuthorNotePrompt(() =>
       checkWorldInfo(scanText, HUGE_WORLD_INFO_CONTEXT, true),

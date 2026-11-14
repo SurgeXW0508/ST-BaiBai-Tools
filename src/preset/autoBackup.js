@@ -1,5 +1,6 @@
 import { event_types, eventSource, getRequestHeaders } from '@sillytavern/script';
 import { oai_settings } from '@sillytavern/scripts/openai';
+import { callUnderlyingFetch, hasFetchPipelineSlot, registerFetchPipelineSlot, unregisterFetchPipelineSlot } from '../features/fetchPipeline.js';
 import { schedulePresetBackupCleanup } from './backupRetention.js';
 import { PRESET_AUTO_BACKUP_FETCH_KEY, PRESET_AUTO_BACKUP_RENAME_HANDLER_KEY, PRESET_BACKUP_SAVE_URL, PRESET_RENAME_SAVE_GATE_TIMEOUT_MS, PRESET_SAVE_URL } from './constants.js';
 import { clearPendingPresetPromptChangesForSavedRevision, getPresetPromptSaveRevision } from './pendingChanges.js';
@@ -36,55 +37,57 @@ function setPresetAutoBackupBackendAvailable(available) {
 }
 
 function installPresetAutoBackupFetchHook() {
-    const existing = globalThis[PRESET_AUTO_BACKUP_FETCH_KEY];
-
-    if (existing?.wrappedFetch) {
-        existing.isEnabled = () => settings.presetAutoBackupEnabled !== false && presetAutoBackupBackendAvailable;
-        existing.skipCount = Number(existing.skipCount) || 0;
-        return existing;
-    }
-
-    const originalFetch = globalThis.fetch;
-
-    if (typeof originalFetch !== 'function') {
+    if (typeof globalThis.fetch !== 'function') {
         return null;
     }
 
-    const state = {
-        originalFetch: originalFetch.bind(globalThis),
-        wrappedFetch: null,
-        skipCount: 0,
-        isEnabled: () => settings.presetAutoBackupEnabled !== false && presetAutoBackupBackendAvailable,
-    };
+    const existing = globalThis[PRESET_AUTO_BACKUP_FETCH_KEY];
+    const state = existing && typeof existing === 'object'
+        ? existing
+        : {
+            originalFetch: (input, init) => callUnderlyingFetch(input, init),
+            skipCount: 0,
+            isEnabled: () => settings.presetAutoBackupEnabled !== false && presetAutoBackupBackendAvailable,
+        };
 
-    state.wrappedFetch = function baiBaiToolkitPresetAutoBackupFetch(input, init) {
-        const isPresetSaveRequest = isPresetAutoBackupSourceRequest(input, init);
-        const presetSaveBody = isPresetSaveRequest ? readPresetSaveBodySync(init) : null;
+    state.originalFetch = (input, init) => callUnderlyingFetch(input, init);
+    state.isEnabled = () => settings.presetAutoBackupEnabled !== false && presetAutoBackupBackendAvailable;
+    state.skipCount = Number(state.skipCount) || 0;
 
-        if (state.isEnabled() && isPresetSaveRequest) {
-            if (state.renameSuppress) {
-                // 重命名进行中:不立即备份,只同步记住最后一次保存内容,窗口关闭时再补一次。
-                capturePresetRenameBackupBodySync(state, presetSaveBody);
-            } else if (state.skipCount > 0) {
-                state.skipCount -= 1;
-            } else {
-                void schedulePresetAutoBackupFromRequest(state, input, init, presetSaveBody);
+    if (!hasFetchPipelineSlot('presetAutoBackup')) {
+        registerFetchPipelineSlot('presetAutoBackup', function baiBaiToolkitPresetAutoBackupFetch(input, init, nextFetch) {
+            const isPresetSaveRequest = isPresetAutoBackupSourceRequest(input, init);
+            const presetSaveBody = isPresetSaveRequest ? readPresetSaveBodySync(init) : null;
+
+            if (state.isEnabled() && isPresetSaveRequest) {
+                if (state.renameSuppress) {
+                    // 重命名进行中:不立即备份,只同步记住最后一次保存内容,窗口关闭时再补一次。
+                    capturePresetRenameBackupBodySync(state, presetSaveBody);
+                } else if (state.skipCount > 0) {
+                    state.skipCount -= 1;
+                } else {
+                    void schedulePresetAutoBackupFromRequest(state, input, init, presetSaveBody);
+                }
             }
-        }
 
-        const requestPromise = state.originalFetch(input, init);
+            const requestPromise = nextFetch(input, init);
 
-        if (isOpenAiPresetSaveBody(presetSaveBody)) {
-            trackOpenAiPresetSaveRequest(state, presetSaveBody, requestPromise);
-        }
+            if (isOpenAiPresetSaveBody(presetSaveBody)) {
+                trackOpenAiPresetSaveRequest(state, presetSaveBody, requestPromise);
+            }
 
-        return requestPromise;
-    };
+            return requestPromise;
+        });
+    }
 
-    state.wrappedFetch[PRESET_AUTO_BACKUP_FETCH_KEY] = true;
     globalThis[PRESET_AUTO_BACKUP_FETCH_KEY] = state;
-    globalThis.fetch = state.wrappedFetch;
     return state;
+}
+
+function disablePresetAutoBackupFetchHook() {
+    const removed = unregisterFetchPipelineSlot('presetAutoBackup');
+    delete globalThis[PRESET_AUTO_BACKUP_FETCH_KEY];
+    return removed;
 }
 
 function skipNextPresetAutoBackup() {
@@ -454,6 +457,7 @@ export {
     capturePresetRenameBackupBodySync,
     finishOpenAiPresetRenameSaveGateAfterFinalSave,
     flushPresetRenameBackup,
+    disablePresetAutoBackupFetchHook,
     getActiveOpenAiPresetSaveRequests,
     getOpenAiPresetRenameFallbackName,
     getOpenAiPresetRenameSaveGate,

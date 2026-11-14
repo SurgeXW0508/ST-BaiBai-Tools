@@ -86,6 +86,29 @@ const featureUtil = {
     },
 };
 
+const fetchPipelineModuleCache = new WeakMap();
+
+async function getFetchPipelineVmModule(context) {
+    let cached = fetchPipelineModuleCache.get(context);
+    if (!cached) {
+        cached = (async () => {
+            const pipelineUrl = new URL('../src/features/fetchPipeline.js', import.meta.url);
+            const pipelineCode = await readFile(pipelineUrl, 'utf8');
+            const pipelineMod = new vm.SourceTextModule(pipelineCode, {
+                context,
+                identifier: '../src/features/fetchPipeline.js',
+            });
+            await pipelineMod.link(specifier => {
+                throw new Error(`Unexpected import in fetchPipeline.js: ${specifier}`);
+            });
+            await pipelineMod.evaluate();
+            return pipelineMod;
+        })();
+        fetchPipelineModuleCache.set(context, cached);
+    }
+    return cached;
+}
+
 async function loadVmModule(relPath, context, mocks = {}) {
     const fileUrl = new URL(relPath, import.meta.url);
     const code = await readFile(fileUrl, 'utf8');
@@ -99,8 +122,12 @@ async function loadVmModule(relPath, context, mocks = {}) {
             meta.url = 'https://isolated.invalid/scripts/extensions/third-party/ST-BaiBai-Tools/dist/index.js';
         },
     });
-    await mod.link(source => {
+    await mod.link(async source => {
         if (!dependencies.has(source)) {
+            if (!(source in mocks) && (source === './fetchPipeline.js' || source.endsWith('/fetchPipeline.js'))) {
+                dependencies.set(source, await getFetchPipelineVmModule(context));
+                return dependencies.get(source);
+            }
             const values = mocks[source] || {};
             const names = new Set(Object.keys(values));
             for (const entry of imports.filter(item => item.source.value === source)) {
@@ -1684,5 +1711,307 @@ test('WP-4 retired dead modules, True Feature Off fetch-hook splicing, gzip 400/
         chatSettings.welcomeRecentChatDirectOpenEnabled = false;
         welcomeMod.applyWelcomeRecentChatDirectOpenOptimization();
         assert.equal(removedClicks.length, 1, 'Disabled welcomeRecentChatDirectOpen removes capture click listener');
+    }
+});
+
+test('WP-3: fetchPipeline preserves topological order across gzipHook re-enable and concurrent saveToggle waiters', async () => {
+    // 1. Static policy guard: only src/features/fetchPipeline.js (excluding unassembled saveGenerate.js and unit tests) may assign globalThis.fetch
+    {
+        const srcRoot = fileURLToPath(new URL('../src', import.meta.url));
+        const offenders = [];
+        async function walkSrc(dir) {
+            for (const entry of await fs.promises.readdir(dir, { withFileTypes: true })) {
+                const full = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                    await walkSrc(full);
+                    continue;
+                }
+                if (!/\.(?:[cm]?js|ts|vue)$/.test(entry.name)) continue;
+                if (/\.(?:test|spec)\.[cm]?[jt]s$/.test(entry.name)) continue;
+                const rel = path.relative(srcRoot, full).replace(/\\/g, '/');
+                if (rel === 'features/fetchPipeline.js' || rel === 'features/saveGenerate.js') continue;
+                const text = await readFile(full, 'utf8');
+                if (/\b(?:globalThis|window)\.fetch\s*=/.test(text)) {
+                    offenders.push(rel);
+                }
+            }
+        }
+        await walkSrc(srcRoot);
+        assert.deepEqual(offenders, [], `Unexpected direct globalThis/window.fetch assignments outside fetchPipeline.js: ${offenders.join(', ')}`);
+    }
+
+    // 2. theme.js + autoBackup.js + gzipHook.js -> disable gzipHook -> re-enable gzipHook -> plain JSON still seen by theme & autoBackup while wire sees gzip!
+    {
+        const wireCalls = [];
+        const backupPayloads = [];
+        const baseFetch = async (input, init) => {
+            const url = String(input);
+            const headers = new Headers(init?.headers || (input instanceof Request ? input.headers : undefined));
+            wireCalls.push({ url, encoding: headers.get('content-encoding'), body: init?.body });
+            if (url === '/backups/save') {
+                backupPayloads.push(JSON.parse(String(init?.body || '{}')));
+                return new Response(JSON.stringify({ ok: true, data: { fileName: 'PresetReenabled-1.json' } }), { status: 200 });
+            }
+            return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        };
+
+        const pipeCtx = vm.createContext({
+            console: { debug: () => {}, warn: () => {} },
+            CompressionStream,
+            Response,
+            Request,
+            Headers,
+            URL,
+            URLSearchParams,
+            Blob,
+            FormData,
+            ReadableStream,
+            ArrayBuffer,
+            Uint8Array,
+            performance,
+            setTimeout,
+            clearTimeout,
+            fetch: baseFetch,
+            location: { origin: 'https://st.example.com', href: 'https://st.example.com/' },
+        });
+        pipeCtx.globalThis = pipeCtx;
+        pipeCtx.window = pipeCtx;
+
+        const pipelineMod = await loadVmModule('../src/features/fetchPipeline.js', pipeCtx);
+        assert.ok(
+            pipelineMod.FETCH_PIPELINE_SLOT_ORDER.indexOf('extensionOps') < pipelineMod.FETCH_PIPELINE_SLOT_ORDER.indexOf('updateDiagnostics'),
+            'extensionOps must precede updateDiagnostics so X-Baibaoku-Job-Id header is attached first',
+        );
+
+        const gzipSettings = { saveRequestGzipEnabled: true };
+        const gzipMod = await loadVmModule('../src/features/gzipHook.js', pipeCtx, {
+            './constants.js': {
+                LOG_PREFIX: '[test]',
+                SAVE_REQUEST_GZIP_FETCH_KEY: '__baiBaiToolkitSaveRequestGzipFetch',
+                SAVE_REQUEST_GZIP_PATHS: new Set(['/api/chats/save', '/api/themes/save', '/api/presets/save']),
+            },
+            './perfTrace.js': {
+                getPerformanceTraceStackSummary: () => '',
+                recordPerformanceTraceGzipCompression: () => {},
+            },
+            './state.js': { settings: gzipSettings },
+        });
+
+        const themeMod = await loadVmModule('../src/features/theme.js', pipeCtx, {
+            '@sillytavern/script': { getRequestHeaders: () => ({ 'Content-Type': 'application/json' }), saveSettingsDebounced: () => {} },
+            '@sillytavern/scripts/power-user': { applyPowerUserSettings: () => {}, power_user: {} },
+            '@sillytavern/scripts/utils': { cancelDebounce: () => {} },
+            '../scrollTopPatch.js': { registerScrollTopWriteInterceptor: () => () => {} },
+            './constants.js': {
+                BAIBAOKU_EARLY_BRIDGE_KEY: '__bbkEarly',
+                BAIBAOKU_THEME_COLOR_BINDINGS: [],
+                BAIBAOKU_THEME_GET_URL: '/api/plugins/baibaoku/v1/themes/get',
+                BAIBAOKU_THEME_LOADING_FIXED_CLASS: 'fixed',
+                BAIBAOKU_THEME_LOADING_HOST_CLASS: 'host',
+                BAIBAOKU_THEME_LOADING_OVERLAY_CLASS: 'overlay',
+                BAIBAOKU_THEME_LOADING_SPINNER_CLASS: 'spinner',
+                BAIBAOKU_THEME_LOADING_STYLE_ID: 'style',
+                BAIBAOKU_THEME_POWER_USER_KEYS: [],
+                CUSTOM_CSS_CODEMIRROR_EDITOR_KEY: '__cm',
+                CUSTOM_CSS_THEME_SYNC_SETTLE_DELAYS_MS: [],
+                LAZY_THEME_CHANGE_GUARD_KEY: '__lazyThemeGuard',
+                LOG_PREFIX: '[test]',
+                THEME_APPLY_REFLOW_GUARD_METRICS: [],
+                THEME_APPLY_REFLOW_GUARD_PATCH_KEY: '__reflowPatch',
+                THEME_APPLY_REFLOW_GUARD_WINDOW_MS: 50,
+                THEME_CACHE_SYNC_FETCH_KEY: '__themeCacheFetch',
+                THEME_DELETE_PATH: '/api/themes/delete',
+                THEME_MANAGER_BACKGROUND_BINDINGS_KEY: '__bgBindings',
+                THEME_MANAGER_BACKGROUND_SELECTOR: '#bg',
+                THEME_MANAGER_PANEL_SELECTOR: '#panel',
+                THEME_MANAGER_THEME_ITEM_SELECTOR: '.item',
+                THEME_SAVE_PATH: '/api/themes/save',
+            },
+            './customCss.js': { syncCustomCssStateFromSettings: () => {} },
+            './gzipHook.js': gzipMod,
+            './state.js': { extensionState: {}, settings: {} },
+        });
+
+        const autoBackupMod = await loadVmModule('../src/preset/autoBackup.js', pipeCtx, {
+            '@sillytavern/script': {
+                event_types: {},
+                eventSource: { on: () => {} },
+                getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+            },
+            '@sillytavern/scripts/openai': { oai_settings: {} },
+            './backupRetention.js': { schedulePresetBackupCleanup: () => {} },
+            './constants.js': {
+                PRESET_AUTO_BACKUP_FETCH_KEY: '__presetAutoBackupFetch',
+                PRESET_AUTO_BACKUP_RENAME_HANDLER_KEY: '__presetRenameHandler',
+                PRESET_BACKUP_SAVE_URL: '/backups/save',
+                PRESET_RENAME_SAVE_GATE_TIMEOUT_MS: 500,
+                PRESET_SAVE_URL: '/api/presets/save',
+            },
+            './pendingChanges.js': {
+                clearPendingPresetPromptChangesForSavedRevision: () => {},
+                getPresetPromptSaveRevision: () => 1,
+            },
+            './state.js': {
+                LOG_PREFIX: '[test]',
+                extensionState: {},
+                settings: { presetAutoBackupEnabled: true },
+            },
+        });
+
+        themeMod.installThemePageCacheSyncFetchHook();
+        autoBackupMod.installPresetAutoBackupFetchHook();
+        gzipMod.syncSaveRequestGzipFetchHook();
+
+        // Disable gzipHook -> removed from pipeline & 100% inactive
+        gzipSettings.saveRequestGzipEnabled = false;
+        gzipMod.syncSaveRequestGzipFetchHook();
+        assert.equal(pipelineMod.hasFetchPipelineSlot('saveRequestGzip'), false, 'Disabled gzipHook must unregister saveRequestGzip slot');
+
+        wireCalls.length = 0;
+        await pipeCtx.fetch('/api/themes/save', {
+            method: 'POST',
+            body: JSON.stringify({ name: 'NordDisabled', blur_strength: 4 }),
+        });
+        assert.equal(wireCalls.length, 1);
+        assert.equal(wireCalls[0].encoding, null, 'Disabled gzipHook must send plain JSON on wire');
+        assert.equal(typeof wireCalls[0].body, 'string');
+
+        // Re-enable gzipHook AFTER theme.js & autoBackup.js -> MUST still run INNER to themeCacheSync & presetAutoBackup!
+        gzipSettings.saveRequestGzipEnabled = true;
+        gzipMod.syncSaveRequestGzipFetchHook();
+        assert.deepEqual(
+            [...pipelineMod.getActiveFetchPipelineSlots()],
+            ['presetAutoBackup', 'themeCacheSync', 'saveRequestGzip'],
+            'Re-enabled saveRequestGzip must stay inner to presetAutoBackup and themeCacheSync',
+        );
+
+        wireCalls.length = 0;
+        await pipeCtx.fetch('/api/themes/save', {
+            method: 'POST',
+            body: JSON.stringify({ name: 'NordReenabled', blur_strength: 12 }),
+        });
+        assert.equal(wireCalls.length, 1);
+        assert.equal(wireCalls[0].encoding, 'gzip', 'Re-enabled gzipHook must compress /api/themes/save on wire');
+        assert.equal(wireCalls[0].body instanceof Blob && wireCalls[0].body.size > 0, true);
+        assert.deepEqual(
+            { ...themeMod.baibaokuThemePageCache.get('NordReenabled') },
+            { name: 'NordReenabled', blur_strength: 12 },
+            'theme.js must still inspect plain JSON body before inner gzipHook compresses it',
+        );
+
+        wireCalls.length = 0;
+        backupPayloads.length = 0;
+        await pipeCtx.fetch('/api/presets/save', {
+            method: 'POST',
+            body: JSON.stringify({ apiId: 'openai', name: 'PresetReenabled', preset: { temperature: 0.85 } }),
+        });
+        await new Promise(resolve => setTimeout(resolve, 20));
+
+        const presetSaveWire = wireCalls.find(item => item.url === '/api/presets/save');
+        assert.ok(presetSaveWire, '/api/presets/save must reach wire');
+        assert.equal(presetSaveWire.encoding, 'gzip', 'Re-enabled gzipHook must compress /api/presets/save on wire');
+        assert.equal(presetSaveWire.body instanceof Blob && presetSaveWire.body.size > 0, true);
+        assert.equal(backupPayloads.length, 1, 'autoBackup.js must still read plain JSON /api/presets/save and dispatch /backups/save');
+        assert.equal(backupPayloads[0].name, 'PresetReenabled');
+        assert.deepEqual(backupPayloads[0].preset, { temperature: 0.85 });
+    }
+
+    // 3. saveToggle.js waitForOpenAiPresetUpdateRequest concurrent with gzipHook toggling off/on never corrupts globalThis.fetch
+    {
+        const baseFetch = async () => new Response(JSON.stringify({ ok: true }), { status: 200 });
+        const toggleCtx = vm.createContext({
+            console: { debug: () => {}, warn: () => {} },
+            CompressionStream,
+            Response,
+            Request,
+            Headers,
+            URL,
+            URLSearchParams,
+            Blob,
+            FormData,
+            ReadableStream,
+            ArrayBuffer,
+            Uint8Array,
+            performance,
+            setTimeout,
+            clearTimeout,
+            fetch: baseFetch,
+            location: { origin: 'https://st.example.com', href: 'https://st.example.com/' },
+        });
+        toggleCtx.globalThis = toggleCtx;
+        toggleCtx.window = toggleCtx;
+
+        const pipelineMod = await loadVmModule('../src/features/fetchPipeline.js', toggleCtx);
+        const gzipSettings = { saveRequestGzipEnabled: true };
+        const gzipMod = await loadVmModule('../src/features/gzipHook.js', toggleCtx, {
+            './constants.js': {
+                LOG_PREFIX: '[test]',
+                SAVE_REQUEST_GZIP_FETCH_KEY: '__baiBaiToolkitSaveRequestGzipFetch',
+                SAVE_REQUEST_GZIP_PATHS: new Set(['/api/presets/save']),
+            },
+            './perfTrace.js': {
+                getPerformanceTraceStackSummary: () => '',
+                recordPerformanceTraceGzipCompression: () => {},
+            },
+            './state.js': { settings: gzipSettings },
+        });
+        const saveToggleMod = await loadVmModule('../src/preset/saveToggle.js', toggleCtx, {
+            '@sillytavern/scripts/openai': { oai_settings: {}, promptManager: {} },
+            '@sillytavern/scripts/PromptManager': { INJECTION_POSITION: {} },
+            './codeMirror.js': { flushPresetPromptCodeMirrorEditor: () => {} },
+            './constants.js': {
+                PRESET_PROMPT_MANAGER_LIST_SELECTOR: '#list',
+                PRESET_PROMPT_MANAGER_SAVE_SELECTOR: '#save',
+                PRESET_SAVE_HANDLER_KEY: '__saveHandler',
+                PRESET_TOGGLE_HANDLER_KEY: '__toggleHandler',
+                refreshPromptManagerTokensDebounced: () => {},
+            },
+            './pendingChanges.js': {
+                flushPendingPresetPromptChanges: async () => {},
+                getChatCompletionPresetFromSettings: () => ({}),
+                getPresetPromptSaveRevision: () => 1,
+                markOpenAiPresetSavePending: () => {},
+                markPresetPromptServiceSettingsSavePending: () => {},
+                saveOpenAiPresetSnapshot: async () => {},
+                syncOpenAiPromptManagerStateToSettings: () => {},
+                updatePresetVuePromptItemEnabled: () => false,
+            },
+            './state.js': { LOG_PREFIX: '[test]', extensionState: {}, settings: {} },
+            './switchFast.js': { updatePresetEffectiveTokenHeaderDisplay: () => {} },
+            './util.js': { isPresetGroupingEnabled: () => false },
+            './vueList.js': {
+                isPresetVuePromptListManagerActive: () => false,
+                markPresetVuePromptListSyncSignatureCurrent: () => {},
+            },
+        });
+
+        gzipMod.syncSaveRequestGzipFetchHook();
+
+        const waiterA = saveToggleMod.waitForOpenAiPresetUpdateRequest('PresetA');
+        const waiterB = saveToggleMod.waitForOpenAiPresetUpdateRequest('PresetB');
+
+        // Toggle gzipHook off -> on -> off while both ephemeral waiters are active!
+        gzipSettings.saveRequestGzipEnabled = false;
+        gzipMod.syncSaveRequestGzipFetchHook();
+        gzipSettings.saveRequestGzipEnabled = true;
+        gzipMod.syncSaveRequestGzipFetchHook();
+
+        await toggleCtx.fetch('/api/presets/save', {
+            method: 'POST',
+            body: JSON.stringify({ apiId: 'openai', name: 'PresetA', preset: {} }),
+        });
+        assert.equal(await waiterA, true, 'waiterA must resolve true for PresetA even while gzipHook toggled');
+
+        gzipSettings.saveRequestGzipEnabled = false;
+        gzipMod.syncSaveRequestGzipFetchHook();
+
+        await toggleCtx.fetch('/api/presets/save', {
+            method: 'POST',
+            body: JSON.stringify({ apiId: 'openai', name: 'PresetB', preset: {} }),
+        });
+        assert.equal(await waiterB, true, 'waiterB must resolve true for PresetB');
+
+        assert.deepEqual([...pipelineMod.getActiveFetchPipelineSlots()], [], 'All pipeline slots must be empty after waiters and gzipHook exit');
+        assert.equal(toggleCtx.fetch, baseFetch, 'globalThis.fetch must cleanly restore to baseFetch with zero dangling wrappers');
     }
 });

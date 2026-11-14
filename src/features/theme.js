@@ -5,6 +5,7 @@ import { cancelDebounce } from '@sillytavern/scripts/utils';
 import { registerScrollTopWriteInterceptor } from '../scrollTopPatch.js';
 import { BAIBAOKU_EARLY_BRIDGE_KEY, BAIBAOKU_THEME_COLOR_BINDINGS, BAIBAOKU_THEME_GET_URL, BAIBAOKU_THEME_LOADING_FIXED_CLASS, BAIBAOKU_THEME_LOADING_HOST_CLASS, BAIBAOKU_THEME_LOADING_OVERLAY_CLASS, BAIBAOKU_THEME_LOADING_SPINNER_CLASS, BAIBAOKU_THEME_LOADING_STYLE_ID, BAIBAOKU_THEME_POWER_USER_KEYS, CUSTOM_CSS_CODEMIRROR_EDITOR_KEY, CUSTOM_CSS_THEME_SYNC_SETTLE_DELAYS_MS, LAZY_THEME_CHANGE_GUARD_KEY, LOG_PREFIX, THEME_APPLY_REFLOW_GUARD_METRICS, THEME_APPLY_REFLOW_GUARD_PATCH_KEY, THEME_APPLY_REFLOW_GUARD_WINDOW_MS, THEME_CACHE_SYNC_FETCH_KEY, THEME_DELETE_PATH, THEME_MANAGER_BACKGROUND_BINDINGS_KEY, THEME_MANAGER_BACKGROUND_SELECTOR, THEME_MANAGER_PANEL_SELECTOR, THEME_MANAGER_THEME_ITEM_SELECTOR, THEME_SAVE_PATH } from './constants.js';
 import { syncCustomCssStateFromSettings } from './customCss.js';
+import { hasFetchPipelineSlot, registerFetchPipelineSlot, unregisterFetchPipelineSlot } from './fetchPipeline.js';
 import { getFetchRequestMethod, getFetchRequestUrl, isFetchRequest } from './gzipHook.js';
 import { extensionState, settings } from './state.js';
 const baibaokuThemePageCache = new Map();
@@ -149,22 +150,18 @@ function syncThemePageCacheAfterMutation(pathname, body) {
 // 旧缓存,并经 applyTheme + saveSettingsDebounced 把旧值写回 settings,表现
 // 为“保存的修改丢了”。这里拦截成功响应,用请求体刷新缓存。
 function installThemePageCacheSyncFetchHook() {
-    const existing = globalThis[THEME_CACHE_SYNC_FETCH_KEY];
-    if (existing?.wrappedFetch) {
-        return existing;
-    }
-
-    const originalFetch = globalThis.fetch;
-    if (typeof originalFetch !== 'function') {
+    if (typeof globalThis.fetch !== 'function') {
         return null;
     }
 
-    const state = {
-        originalFetch: originalFetch.bind(globalThis),
-        wrappedFetch: null,
-    };
+    const existing = globalThis[THEME_CACHE_SYNC_FETCH_KEY];
+    if (existing && hasFetchPipelineSlot('themeCacheSync')) {
+        return existing;
+    }
 
-    state.wrappedFetch = async function baiBaiToolkitThemeCacheSyncFetch(input, init) {
+    const state = existing && typeof existing === 'object' ? existing : {};
+
+    registerFetchPipelineSlot('themeCacheSync', async function baiBaiToolkitThemeCacheSyncFetch(input, init, nextFetch) {
         let pathname = '';
         let body = null;
 
@@ -178,7 +175,7 @@ function installThemePageCacheSyncFetchHook() {
             pathname = '';
         }
 
-        const response = await state.originalFetch(input, init);
+        const response = await nextFetch(input, init);
 
         if (pathname && response?.ok) {
             try {
@@ -190,12 +187,16 @@ function installThemePageCacheSyncFetchHook() {
         }
 
         return response;
-    };
+    });
 
-    state.wrappedFetch[THEME_CACHE_SYNC_FETCH_KEY] = true;
     globalThis[THEME_CACHE_SYNC_FETCH_KEY] = state;
-    globalThis.fetch = state.wrappedFetch;
     return state;
+}
+
+function disableThemePageCacheSyncFetchHook() {
+    const removed = unregisterFetchPipelineSlot('themeCacheSync');
+    delete globalThis[THEME_CACHE_SYNC_FETCH_KEY];
+    return removed;
 }
 
 function applyBaibaokuThemeColorBindings() {
@@ -947,6 +948,7 @@ export {
     cacheBaibaokuCurrentThemeSnapshot,
     cancelThemePrintCharactersIfUnchanged,
     clearCustomCssCodeMirrorThemeSyncTimers,
+    disableThemePageCacheSyncFetchHook,
     ensureBaibaokuSelectOption,
     fetchBaibaokuThemeByName,
     getBaibaokuEarlyBridge,

@@ -79,10 +79,11 @@ describe('floor access without rendered messages', () => {
       swipes: ['  酒馆编辑框中已去空白的正文  '],
       swipe_id: 0,
     };
+    const chat = [message];
     vi.stubGlobal('window', {
       SillyTavern: {
         getContext: () => ({
-          chat: [message],
+          chat,
           getCurrentChatId: () => 'chat-a',
           saveChat: vi.fn(async () => undefined),
         }),
@@ -336,7 +337,7 @@ describe('floor access without rendered messages', () => {
     async function saveChatConditional(): Promise<void> {
       const response = await fetch('/api/chats/save', {
         method: 'POST',
-        body: JSON.stringify({ file_name: 'chat-a', chat: [message] }),
+        body: JSON.stringify({ avatar_url: 'char.png', file_name: 'chat-a', chat: [message] }),
       });
       if (!response.ok) {
         // 模拟酒馆原生 saveChat 吞掉 HTTP 500 只弹 toastr 不抛异常
@@ -422,14 +423,14 @@ describe('floor access without rendered messages', () => {
     async function saveChatConditional(): Promise<void> {
       const first = await fetch('/api/chats/save', {
         method: 'POST',
-        body: JSON.stringify({ file_name: 'chat-a', force: false }),
+        body: JSON.stringify({ avatar_url: 'char.png', file_name: 'chat-a', force: false }),
       });
       if (!first.ok) {
         const err = await first.json();
         if (err.error === 'integrity') {
           await fetch('/api/chats/save', {
             method: 'POST',
-            body: JSON.stringify({ file_name: 'chat-a', force: true }),
+            body: JSON.stringify({ avatar_url: 'char.png', file_name: 'chat-a', force: true }),
           });
         }
       }
@@ -446,6 +447,182 @@ describe('floor access without rendered messages', () => {
     await expect(applyFloorText(0, '原文', '覆盖后正文', 'chat-a')).resolves.toBe('saved');
     expect(calls).toBe(2);
     expect(message.mes).toBe('覆盖后正文');
+  });
+
+  it('rejects and rolls back Character A when user switches to Character B with same file_name during save lock wait', async () => {
+    const messageA = {
+      name: 'Alice',
+      is_user: false,
+      is_system: false,
+      mes: 'Alice 原文',
+      swipes: ['Alice 原文'],
+      swipe_id: 0,
+    };
+    const messageB = {
+      name: 'Bob',
+      is_user: false,
+      is_system: false,
+      mes: 'Bob 原文',
+      swipes: ['Bob 原文'],
+      swipe_id: 0,
+    };
+    const chatA = [messageA];
+    const chatB = [messageB];
+    const characters = [
+      { name: 'Alice', avatar: 'alice.png', chat: 'main' },
+      { name: 'Bob', avatar: 'bob.png', chat: 'main' },
+    ];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })),
+    );
+
+    let activeContext: Record<string, unknown> = {
+      chat: chatA,
+      characterId: 0,
+      characters,
+      getCurrentChatId: () => 'main',
+      saveChat: async () => {
+        // 模拟等待保存锁期间用户切到角色 B，并且角色 B 触发了一次同名 file_name='main' 的 200 OK 保存
+        activeContext = {
+          ...activeContext,
+          chat: chatB,
+          characterId: 1,
+          getCurrentChatId: () => 'main',
+        };
+        await fetch('/api/chats/save', {
+          method: 'POST',
+          body: JSON.stringify({
+            avatar_url: 'bob.png',
+            ch_name: 'Bob',
+            file_name: 'main',
+            chat: chatB,
+          }),
+        });
+        return false;
+      },
+    };
+
+    vi.stubGlobal('window', {
+      SillyTavern: {
+        getContext: () => activeContext,
+      },
+    });
+    vi.stubGlobal('document', {
+      querySelector: vi.fn(() => null),
+    });
+
+    await expect(
+      applyFloorText(0, 'Alice 原文', 'Alice 改写草稿', 'main', 'character:alice.png\u0000main'),
+    ).rejects.toThrow();
+
+    expect(messageA.mes).toBe('Alice 原文');
+    expect(messageA.swipes).toEqual(['Alice 原文']);
+    expect(messageB.mes).toBe('Bob 原文');
+    expect(messageB.swipes).toEqual(['Bob 原文']);
+  });
+
+  it('skips DOM settlement, refresh, reloadCurrentChat, and MESSAGE_UPDATED on Character B if MESSAGE_EDITED switches chats after Character A persisted', async () => {
+    const messageA = {
+      name: 'Alice',
+      is_user: false,
+      is_system: false,
+      mes: 'Alice 原文',
+      swipes: ['Alice 原文'],
+      swipe_id: 0,
+    };
+    const messageB = {
+      name: 'Bob',
+      is_user: false,
+      is_system: false,
+      mes: 'Bob 原文',
+      swipes: ['Bob 原文'],
+      swipe_id: 0,
+    };
+    const chatA = [messageA];
+    const chatB = [messageB];
+    const characters = [
+      { name: 'Alice', avatar: 'alice.png', chat: 'chat-a' },
+      { name: 'Bob', avatar: 'bob.png', chat: 'chat-b' },
+    ];
+    const bobEditor = { value: 'Bob 正在编辑的内容' };
+    const bobCancel = { click: vi.fn() };
+    const updateB = vi.fn();
+    const reloadB = vi.fn(async () => undefined);
+    const emitEvents: Array<[string, number]> = [];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })),
+    );
+
+    let activeContext: Record<string, unknown> = {
+      chat: chatA,
+      characterId: 0,
+      characters,
+      getCurrentChatId: () => 'chat-a',
+      saveChat: async () => {
+        await fetch('/api/chats/save', {
+          method: 'POST',
+          body: JSON.stringify({
+            avatar_url: 'alice.png',
+            ch_name: 'Alice',
+            file_name: 'chat-a',
+            chat: chatA,
+          }),
+        });
+      },
+      eventTypes: {
+        MESSAGE_EDITED: 'edited',
+        MESSAGE_UPDATED: 'updated',
+      },
+      eventSource: {
+        emit: vi.fn(async (evt: string, idx: number) => {
+          emitEvents.push([evt, idx]);
+          if (evt === 'edited') {
+            // 异步 MESSAGE_EDITED 回调期间切到会话 B
+            activeContext = {
+              ...activeContext,
+              chat: chatB,
+              characterId: 1,
+              getCurrentChatId: () => 'chat-b',
+              updateMessageBlock: updateB,
+              reloadCurrentChat: reloadB,
+            };
+          }
+        }),
+      },
+    };
+
+    vi.stubGlobal('window', {
+      SillyTavern: {
+        getContext: () => activeContext,
+      },
+    });
+    vi.stubGlobal('document', {
+      querySelector: vi.fn(() => {
+        if (activeContext.characterId !== 1) return null;
+        return {
+          querySelector: (sel: string) => {
+            if (sel === '#curEditTextarea') return bobEditor;
+            if (sel === '.mes_edit_cancel') return bobCancel;
+            return null;
+          },
+        };
+      }),
+    });
+
+    await expect(
+      applyFloorText(0, 'Alice 原文', 'Alice 已落盘新文', 'chat-a', 'character:alice.png\u0000chat-a'),
+    ).resolves.toBe('saved');
+
+    expect(messageA.mes).toBe('Alice 已落盘新文');
+    expect(bobEditor.value).toBe('Bob 正在编辑的内容');
+    expect(bobCancel.click).not.toHaveBeenCalled();
+    expect(updateB).not.toHaveBeenCalled();
+    expect(reloadB).not.toHaveBeenCalled();
+    expect(emitEvents).toEqual([['edited', 0]]);
   });
 
   it('rejects temporary chats and active streaming before mutating message memory', async () => {

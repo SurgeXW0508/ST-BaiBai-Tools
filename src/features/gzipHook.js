@@ -1,73 +1,33 @@
 import { LOG_PREFIX, SAVE_REQUEST_GZIP_FETCH_KEY, SAVE_REQUEST_GZIP_PATHS } from './constants.js';
+import { hasFetchPipelineSlot, registerFetchPipelineSlot, unregisterFetchPipelineSlot } from './fetchPipeline.js';
 import { getPerformanceTraceStackSummary, recordPerformanceTraceGzipCompression } from './perfTrace.js';
 import { settings } from './state.js';
 
-function isFetchWrapperInChain(root, target) {
-    if (typeof root !== 'function' || typeof target !== 'function') {
-        return false;
-    }
-    const visited = new Set();
-    let cursor = root;
-    while (typeof cursor === 'function' && !visited.has(cursor)) {
-        if (cursor === target) {
-            return true;
-        }
-        visited.add(cursor);
-        cursor = cursor.__baiBaiToolkitOriginalFetch;
-    }
-    return false;
-}
-
-function spliceFetchWrapperOut(wrappedFetch, rawOriginalFetch) {
-    if (typeof wrappedFetch !== 'function' || typeof rawOriginalFetch !== 'function') {
-        return false;
-    }
-    if (globalThis.fetch === wrappedFetch) {
-        globalThis.fetch = rawOriginalFetch;
-        return true;
-    }
-    const visited = new Set();
-    let cursor = globalThis.fetch;
-    while (typeof cursor === 'function' && !visited.has(cursor)) {
-        visited.add(cursor);
-        if (cursor.__baiBaiToolkitOriginalFetch === wrappedFetch) {
-            cursor.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
-            if (cursor.__baiBaiToolkitHookState && typeof cursor.__baiBaiToolkitHookState === 'object') {
-                cursor.__baiBaiToolkitHookState.rawOriginalFetch = rawOriginalFetch;
-                cursor.__baiBaiToolkitHookState.originalFetch = rawOriginalFetch.bind(globalThis);
-            }
-            return true;
-        }
-        cursor = cursor.__baiBaiToolkitOriginalFetch;
-    }
-    return false;
-}
-
 function installSaveRequestGzipFetchHook() {
+    if (typeof globalThis.fetch !== 'function') {
+        return null;
+    }
+
     const existing = globalThis[SAVE_REQUEST_GZIP_FETCH_KEY];
-    if (existing?.wrappedFetch && isFetchWrapperInChain(globalThis.fetch, existing.wrappedFetch)) {
+    if (existing && hasFetchPipelineSlot('saveRequestGzip')) {
         existing.disabled = false;
         existing.isEnabled = () => settings.saveRequestGzipEnabled !== false;
         return existing;
     }
 
-    const rawOriginalFetch = globalThis.fetch;
+    const state = existing && typeof existing === 'object'
+        ? existing
+        : {
+            disabled: false,
+            isEnabled: () => settings.saveRequestGzipEnabled !== false,
+        };
 
-    if (typeof rawOriginalFetch !== 'function') {
-        return null;
-    }
+    state.disabled = false;
+    state.isEnabled = () => settings.saveRequestGzipEnabled !== false;
 
-    const state = {
-        rawOriginalFetch,
-        originalFetch: rawOriginalFetch.bind(globalThis),
-        wrappedFetch: null,
-        disabled: false,
-        isEnabled: () => settings.saveRequestGzipEnabled !== false,
-    };
-
-    state.wrappedFetch = async function baiBaiToolkitSaveRequestGzipFetch(input, init) {
+    registerFetchPipelineSlot('saveRequestGzip', async function baiBaiToolkitSaveRequestGzipFetch(input, init, nextFetch) {
         if (state.disabled || !state.isEnabled()) {
-            return state.originalFetch(input, init);
+            return nextFetch(input, init);
         }
 
         let method;
@@ -110,43 +70,36 @@ function installSaveRequestGzipFetchHook() {
             }
         } catch (error) {
             console.warn(`${LOG_PREFIX} Gzip save request skipped:`, error);
-            return state.originalFetch(input, init);
+            return nextFetch(input, init);
         }
 
         if (!compressedInit) {
-            return state.originalFetch(input, init);
+            return nextFetch(input, init);
         }
 
         // Only retry uncompressed on explicit HTTP 400/415 format/encoding rejection;
         // never retry network/abort errors or 5xx responses on non-idempotent save mutations.
-        const response = await state.originalFetch(input, compressedInit);
+        const response = await nextFetch(input, compressedInit);
         if (response?.status === 400 || response?.status === 415) {
             console.warn(`${LOG_PREFIX} Gzip save request returned ${response.status}, retrying uncompressed.`);
             const retry = buildUncompressedSaveRequestRetry(input, init, method, originalHeaders, bodyInfo);
-            return state.originalFetch(retry.input, retry.init);
+            return nextFetch(retry.input, retry.init);
         }
         return response;
-    };
+    });
 
-    state.wrappedFetch[SAVE_REQUEST_GZIP_FETCH_KEY] = true;
-    state.wrappedFetch.__baiBaiToolkitOriginalFetch = rawOriginalFetch;
-    state.wrappedFetch.__baiBaiToolkitHookState = state;
     globalThis[SAVE_REQUEST_GZIP_FETCH_KEY] = state;
-    globalThis.fetch = state.wrappedFetch;
     return state;
 }
 
 function disableSaveRequestGzipFetchHook() {
     const existing = globalThis[SAVE_REQUEST_GZIP_FETCH_KEY];
-    if (!existing?.wrappedFetch) {
-        return false;
+    if (existing && typeof existing === 'object') {
+        existing.disabled = true;
     }
-    existing.disabled = true;
-    const spliced = spliceFetchWrapperOut(existing.wrappedFetch, existing.rawOriginalFetch);
-    if (spliced || !isFetchWrapperInChain(globalThis.fetch, existing.wrappedFetch)) {
-        delete globalThis[SAVE_REQUEST_GZIP_FETCH_KEY];
-    }
-    return spliced;
+    const removed = unregisterFetchPipelineSlot('saveRequestGzip');
+    delete globalThis[SAVE_REQUEST_GZIP_FETCH_KEY];
+    return removed;
 }
 
 function syncSaveRequestGzipFetchHook() {
@@ -464,13 +417,11 @@ export {
     isFetchReadableStream,
     isFetchRequest,
     isFetchUrlSearchParams,
-    isFetchWrapperInChain,
     isLocalOrPrivateHost,
     isLocalOrPrivateIpv4,
     isLocalOrPrivateIpv6,
     normalizeFetchBody,
     normalizeHostname,
     parseIpv4Address,
-    spliceFetchWrapperOut,
     syncSaveRequestGzipFetchHook,
 };

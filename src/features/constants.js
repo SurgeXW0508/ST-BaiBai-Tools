@@ -18,6 +18,7 @@ const BAIBAOKU_THEME_LOADING_HOST_CLASS = 'bai-bai-toolkit-theme-loading-host';
 const BAIBAOKU_THEME_LOADING_OVERLAY_CLASS = 'bai-bai-toolkit-theme-loading-overlay';
 const BAIBAOKU_THEME_LOADING_FIXED_CLASS = 'bai-bai-toolkit-theme-loading-overlay-fixed';
 const BAIBAOKU_THEME_LOADING_SPINNER_CLASS = 'bai-bai-toolkit-theme-loading-spinner';
+const FETCH_PIPELINE_KEY = '__baiBaiToolkitFetchPipeline';
 const THEME_CACHE_SYNC_FETCH_KEY = '__baiBaiToolkitThemeCacheSyncFetchPatched';
 const THEME_SAVE_PATH = '/api/themes/save';
 const THEME_DELETE_PATH = '/api/themes/delete';
@@ -391,6 +392,7 @@ export {
     EXTENSION_UPDATE_PATH,
     EXTENSION_VERSION_CHECK_TIMEOUT_MS,
     EXTENSION_VERSION_PATH,
+    FETCH_PIPELINE_KEY,
     GENERATE_BLACKLIST_SETTLED_EVENT,
     GENERATE_RETRY_BASE_DELAY_MS,
     GENERATE_RETRY_DEFAULT_RETRIES,

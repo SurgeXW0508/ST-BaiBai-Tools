@@ -4,9 +4,47 @@ import {
   getOpenChatIdentity,
   isChatStreaming,
   type STContext,
+  type STMessage,
 } from '@pen/st/context';
+import {
+  hasFetchPipelineSlot,
+  registerFetchPipelineSlot,
+  unregisterFetchPipelineSlot,
+  type FetchPipelineNext,
+} from '../../features/fetchPipeline.js';
 
 type SaveEndpointKind = 'character' | 'group';
+
+export type BoundChatTarget =
+  | {
+      kind: 'character';
+      avatarUrl: string;
+      chName: string;
+      fileName: string;
+      identity: string;
+      chatId: string;
+      chatArrayRef: STMessage[];
+    }
+  | {
+      kind: 'group';
+      groupId: string;
+      groupChatId: string;
+      identity: string;
+      chatId: string;
+      chatArrayRef: STMessage[];
+    };
+
+type ParsedSaveRequestIdentity =
+  | {
+      endpoint: 'character';
+      fileName: string;
+      avatarUrl: string;
+      chName: string;
+    }
+  | {
+      endpoint: 'group';
+      groupChatId: string;
+    };
 
 interface SaveAttemptRecord {
   endpoint: SaveEndpointKind;
@@ -16,28 +54,41 @@ interface SaveAttemptRecord {
 }
 
 interface SaveObservationScope {
-  expectedChatId: string;
-  expectedIdentity: string;
+  target: BoundChatTarget;
   slots: Array<SaveAttemptRecord | null>;
   pending: Promise<void>[];
 }
 
 const SAVE_CHAT_PATH = '/api/chats/save';
 const SAVE_GROUP_CHAT_PATH = '/api/chats/group/save';
-const OBSERVER_MARK = Symbol.for('st-baibai-tools.pen.chat-save-fetch-observer');
-const UNDERLYING_FETCH = Symbol.for('st-baibai-tools.pen.chat-save-underlying-fetch');
-
-type MarkedFetch = typeof fetch & {
-  [OBSERVER_MARK]?: true;
-  [UNDERLYING_FETCH]?: typeof fetch;
-  __penUnderlyingFetch?: typeof fetch;
-  __baiBaiToolkitOriginalFetch?: typeof fetch;
-};
+const CHAT_SAVE_OBSERVER_SLOT = 'chatSaveObserver';
 
 const activeScopes = new Set<SaveObservationScope>();
 
-function normalizeChatKey(value: unknown): string {
+export function normalizeChatKey(value: unknown): string {
   return typeof value === 'string' ? value.trim().replace(/\.jsonl$/i, '') : '';
+}
+
+function parseIdentityDescriptor(identity: string): {
+  kind: 'character' | 'group' | null;
+  actorKey: string;
+  chatId: string;
+} {
+  if (identity.startsWith('group:')) {
+    const rest = identity.slice('group:'.length);
+    const sep = rest.indexOf('\u0000');
+    return sep >= 0
+      ? { kind: 'group', actorKey: rest.slice(0, sep), chatId: rest.slice(sep + 1) }
+      : { kind: 'group', actorKey: rest, chatId: '' };
+  }
+  if (identity.startsWith('character:')) {
+    const rest = identity.slice('character:'.length);
+    const sep = rest.indexOf('\u0000');
+    return sep >= 0
+      ? { kind: 'character', actorKey: rest.slice(0, sep), chatId: rest.slice(sep + 1) }
+      : { kind: 'character', actorKey: rest, chatId: '' };
+  }
+  return { kind: null, actorKey: '', chatId: '' };
 }
 
 function classifySaveEndpoint(input: RequestInfo | URL): SaveEndpointKind | null {
@@ -157,40 +208,63 @@ async function readRequestBodyText(
   return null;
 }
 
-async function extractRequestChatKey(
+async function extractRequestIdentity(
   endpoint: SaveEndpointKind,
   input: RequestInfo | URL,
   init?: RequestInit,
-): Promise<string | null> {
+): Promise<ParsedSaveRequestIdentity | null> {
   const rawText = await readRequestBodyText(input, init);
   if (!rawText || !rawText.trim()) return null;
   try {
-    const parsed = JSON.parse(rawText) as { file_name?: unknown; id?: unknown };
+    const parsed = JSON.parse(rawText) as {
+      file_name?: unknown;
+      avatar_url?: unknown;
+      ch_name?: unknown;
+      id?: unknown;
+    } | null;
+    if (!parsed || typeof parsed !== 'object') return null;
+
     if (endpoint === 'character') {
-      return normalizeChatKey(parsed?.file_name) || null;
+      const fileName = normalizeChatKey(parsed.file_name);
+      if (!fileName) return null;
+      return {
+        endpoint: 'character',
+        fileName,
+        avatarUrl: typeof parsed.avatar_url === 'string' ? parsed.avatar_url.trim() : '',
+        chName: typeof parsed.ch_name === 'string' ? parsed.ch_name.trim() : '',
+      };
     }
-    return normalizeChatKey(parsed?.id) || null;
+
+    const groupChatId = normalizeChatKey(parsed.id);
+    if (!groupChatId) return null;
+    return {
+      endpoint: 'group',
+      groupChatId,
+    };
   } catch {
     return null;
   }
 }
 
 function scopeMatchesRequest(
-  scope: SaveObservationScope,
-  requestChatKey: string | null,
-  liveChatId: string,
-  liveIdentity: string,
+  target: BoundChatTarget,
+  parsedRequest: ParsedSaveRequestIdentity | null,
 ): boolean {
-  if (requestChatKey !== null) {
-    if (!scope.expectedChatId) return true;
-    return requestChatKey === normalizeChatKey(scope.expectedChatId);
+  if (!parsedRequest) return false;
+
+  if (parsedRequest.endpoint === 'character') {
+    if (target.kind !== 'character') return false;
+    if (!parsedRequest.fileName) return false;
+    if (target.fileName && parsedRequest.fileName !== target.fileName) return false;
+    if (target.avatarUrl) {
+      return parsedRequest.avatarUrl === target.avatarUrl;
+    }
+    return true;
   }
-  if (scope.expectedIdentity) {
-    return liveIdentity === scope.expectedIdentity;
-  }
-  if (scope.expectedChatId) {
-    return normalizeChatKey(liveChatId) === normalizeChatKey(scope.expectedChatId);
-  }
+
+  if (target.kind !== 'group') return false;
+  if (!parsedRequest.groupChatId) return false;
+  if (target.groupChatId && parsedRequest.groupChatId !== target.groupChatId) return false;
   return true;
 }
 
@@ -232,101 +306,78 @@ async function inspectSaveResponse(
       };
 }
 
-function isObserverInFetchChain(candidate: unknown): boolean {
-  const visited = new Set<unknown>();
-  let current = candidate as MarkedFetch | undefined;
-  while (typeof current === 'function' && !visited.has(current)) {
-    if (current[OBSERVER_MARK]) return true;
-    visited.add(current);
-    current =
-      current.__baiBaiToolkitOriginalFetch ??
-      current[UNDERLYING_FETCH] ??
-      current.__penUnderlyingFetch;
+function observeChatSaveFetch(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  nextFetch: FetchPipelineNext,
+): Promise<Response> {
+  if (activeScopes.size === 0) {
+    return nextFetch(input, init);
   }
-  return false;
+
+  const endpoint = classifySaveEndpoint(input);
+  if (!endpoint) {
+    return nextFetch(input, init);
+  }
+
+  const reservations = [...activeScopes].map(scope => {
+    const slotIndex = scope.slots.length;
+    scope.slots.push(null);
+    return { scope, slotIndex };
+  });
+
+  // 同步调用底层 nextFetch 前按需提取异步 body Promise（对 Request 立即 clone，绝不阻塞 fetch 派发）
+  const identityPromise = extractRequestIdentity(endpoint, input, init);
+  const responsePromise = nextFetch(input, init);
+
+  const recordPromise = responsePromise.then(
+    response => inspectSaveResponse(endpoint, response),
+    error => ({
+      endpoint,
+      ok: false,
+      errorMessage: `聊天保存请求异常（${error instanceof Error ? error.message : String(error)}），修改未写入磁盘`,
+    }),
+  );
+
+  const settleTask = Promise.all([identityPromise, recordPromise]).then(
+    ([parsedRequest, record]) => {
+      for (const { scope, slotIndex } of reservations) {
+        if (scopeMatchesRequest(scope.target, parsedRequest)) {
+          scope.slots[slotIndex] = record;
+        }
+      }
+    },
+  );
+
+  for (const { scope } of reservations) {
+    scope.pending.push(settleTask);
+  }
+
+  return responsePromise;
+}
+
+function syncChatSaveObserverSlot(): void {
+  if (activeScopes.size > 0) {
+    if (!hasFetchPipelineSlot(CHAT_SAVE_OBSERVER_SLOT)) {
+      registerFetchPipelineSlot(CHAT_SAVE_OBSERVER_SLOT, observeChatSaveFetch);
+    }
+  } else {
+    unregisterFetchPipelineSlot(CHAT_SAVE_OBSERVER_SLOT);
+  }
 }
 
 /**
- * 幂等单次包装 globalThis.fetch，仅在存在活跃保存观察窗口时旁路记录
- * `/api/chats/save` 与 `/api/chats/group/save` 的最终落盘状态，绝不延迟底层 fetch 发起、
- * 绝不消费原始响应流，也绝不在外层存在其他包装器时重复挂载第二层。
+ * 同步 `/api/chats/save` 与 `/api/chats/group/save` 观察槽位生命周期：
+ * 仅在存在活跃保存观察窗口（`activeScopes.size > 0`）时挂载到统一 `fetchPipeline`，
+ * 空闲时自动卸载，保持零常驻拦截。
  */
 export function ensureChatSaveFetchObserver(): void {
-  const current = globalThis.fetch as MarkedFetch | undefined;
-  if (typeof current !== 'function' || isObserverInFetchChain(current)) return;
+  syncChatSaveObserverSlot();
+}
 
-  const hookState = {
-    rawOriginalFetch: current,
-    originalFetch: current.bind(globalThis),
-  };
-  const wrapped: MarkedFetch & { __baiBaiToolkitHookState?: typeof hookState } =
-    function observedChatSaveFetch(
-      this: unknown,
-      input: RequestInfo | URL,
-      init?: RequestInit,
-    ): Promise<Response> {
-      const targetFetch = wrapped.__baiBaiToolkitOriginalFetch ?? hookState.rawOriginalFetch;
-      if (activeScopes.size === 0) {
-        return targetFetch.call(this, input, init);
-      }
-
-      const endpoint = classifySaveEndpoint(input);
-      if (!endpoint) {
-        return targetFetch.call(this, input, init);
-      }
-
-      const liveContextAtDispatch = getContext();
-      const liveChatIdAtDispatch = getOpenChatId(liveContextAtDispatch);
-      const liveIdentityAtDispatch = getOpenChatIdentity(liveContextAtDispatch);
-      const reservations = [...activeScopes].map(scope => {
-        const slotIndex = scope.slots.length;
-        scope.slots.push(null);
-        return { scope, slotIndex };
-      });
-
-      // 同步调用底层 fetch 前按需提取异步 body Promise（对 Request 立即 clone，绝不阻塞 fetch 派发）
-      const chatKeyPromise = extractRequestChatKey(endpoint, input, init);
-      const responsePromise = targetFetch.call(this, input, init);
-
-      const recordPromise = responsePromise.then(
-        response => inspectSaveResponse(endpoint, response),
-        error => ({
-          endpoint,
-          ok: false,
-          errorMessage: `聊天保存请求异常（${error instanceof Error ? error.message : String(error)}），修改未写入磁盘`,
-        }),
-      );
-
-      const settleTask = Promise.all([chatKeyPromise, recordPromise]).then(
-        ([requestChatKey, record]) => {
-          for (const { scope, slotIndex } of reservations) {
-            if (
-              scopeMatchesRequest(
-                scope,
-                requestChatKey,
-                liveChatIdAtDispatch,
-                liveIdentityAtDispatch,
-              )
-            ) {
-              scope.slots[slotIndex] = record;
-            }
-          }
-        },
-      );
-
-      for (const { scope } of reservations) {
-        scope.pending.push(settleTask);
-      }
-
-      return responsePromise;
-    };
-
-  wrapped[OBSERVER_MARK] = true;
-  wrapped[UNDERLYING_FETCH] = current;
-  wrapped.__penUnderlyingFetch = current;
-  wrapped.__baiBaiToolkitOriginalFetch = current;
-  wrapped.__baiBaiToolkitHookState = hookState;
-  globalThis.fetch = wrapped;
+export function teardownChatSaveObserver(): void {
+  activeScopes.clear();
+  unregisterFetchPipelineSlot(CHAT_SAVE_OBSERVER_SLOT);
 }
 
 const HOST_SAVE_FUNCTION_NAMES = new Set([
@@ -379,6 +430,92 @@ export function assertChatPersistable(
   return { chatId, chatIdentity };
 }
 
+function buildBoundChatTargetFromContext(
+  context: STContext | null,
+  resolvedChatId: string,
+  resolvedIdentity: string,
+): BoundChatTarget {
+  const parsedIdentity = parseIdentityDescriptor(resolvedIdentity);
+  const chatArrayRef = Array.isArray(context?.chat) ? context.chat : [];
+
+  if (context?.groupId || parsedIdentity.kind === 'group') {
+    const groupId = String(context?.groupId || parsedIdentity.actorKey || '');
+    const matchedGroup = Array.isArray(context?.groups)
+      ? context.groups.find(group => String(group?.id) === groupId)
+      : undefined;
+    const groupChatId = normalizeChatKey(
+      matchedGroup?.chat_id || resolvedChatId || parsedIdentity.chatId,
+    );
+    return {
+      kind: 'group',
+      groupId,
+      groupChatId,
+      identity: resolvedIdentity,
+      chatId: resolvedChatId || parsedIdentity.chatId,
+      chatArrayRef,
+    };
+  }
+
+  const hasCharacterIndex =
+    context?.characterId !== undefined &&
+    context?.characterId !== null &&
+    context?.characterId !== '';
+  const character = hasCharacterIndex
+    ? context?.characters?.[Number(context.characterId)]
+    : undefined;
+  const characterAvatar = typeof character?.avatar === 'string' ? character.avatar.trim() : '';
+  const fallbackIdentityAvatar =
+    !characterAvatar &&
+    parsedIdentity.kind === 'character' &&
+    parsedIdentity.actorKey &&
+    (!hasCharacterIndex || parsedIdentity.actorKey !== String(context?.characterId))
+      ? parsedIdentity.actorKey.trim()
+      : '';
+  const avatarUrl = characterAvatar || fallbackIdentityAvatar;
+  const chName = typeof character?.name === 'string' ? character.name.trim() : '';
+  const fileName = normalizeChatKey(character?.chat || resolvedChatId || parsedIdentity.chatId);
+
+  return {
+    kind: 'character',
+    avatarUrl,
+    chName,
+    fileName,
+    identity: resolvedIdentity,
+    chatId: resolvedChatId || parsedIdentity.chatId,
+    chatArrayRef,
+  };
+}
+
+export function resolveBoundChatTarget(
+  context: STContext | null,
+  expectedChatId = '',
+  expectedIdentity = '',
+  actionLabel = '保存修改',
+): BoundChatTarget {
+  const { chatId: activeChatId, chatIdentity: activeIdentity } = assertChatPersistable(
+    context,
+    actionLabel,
+  );
+  const resolvedChatId = expectedChatId || activeChatId;
+  const resolvedIdentity = expectedIdentity || activeIdentity;
+  return buildBoundChatTargetFromContext(context, resolvedChatId, resolvedIdentity);
+}
+
+export function isTargetStillActive(
+  target: BoundChatTarget,
+  liveContext: STContext | null = getContext(),
+): liveContext is STContext {
+  if (!liveContext) return false;
+  if (liveContext.chat !== target.chatArrayRef) return false;
+  if (target.identity) {
+    return getOpenChatIdentity(liveContext) === target.identity;
+  }
+  if (target.chatId) {
+    return normalizeChatKey(getOpenChatId(liveContext)) === normalizeChatKey(target.chatId);
+  }
+  return Boolean(liveContext.groupId) === (target.kind === 'group');
+}
+
 export interface VerifiedSaveOutcome<T> {
   value: T;
   observedHttpSave: boolean;
@@ -386,20 +523,28 @@ export interface VerifiedSaveOutcome<T> {
 
 export async function runWithObservedChatSave<T>(
   options: {
-    expectedChatId: string;
-    expectedIdentity: string;
+    target?: BoundChatTarget;
+    expectedChatId?: string;
+    expectedIdentity?: string;
     requireHttpSave: boolean;
   },
   action: () => Promise<T>,
 ): Promise<VerifiedSaveOutcome<T>> {
-  ensureChatSaveFetchObserver();
+  const target =
+    options.target ??
+    buildBoundChatTargetFromContext(
+      getContext(),
+      options.expectedChatId ?? '',
+      options.expectedIdentity ?? '',
+    );
+
   const scope: SaveObservationScope = {
-    expectedChatId: options.expectedChatId,
-    expectedIdentity: options.expectedIdentity,
+    target,
     slots: [],
     pending: [],
   };
   activeScopes.add(scope);
+  syncChatSaveObserverSlot();
 
   let value: T;
   try {
@@ -409,6 +554,11 @@ export async function runWithObservedChatSave<T>(
     }
   } finally {
     activeScopes.delete(scope);
+    syncChatSaveObserverSlot();
+  }
+
+  if ((value as unknown) === false) {
+    throw new Error('聊天保存未完成（当前会话已切换或未写入磁盘），修改未写入磁盘');
   }
 
   const matchedRecords = scope.slots.filter((item): item is SaveAttemptRecord => item !== null);
@@ -422,10 +572,6 @@ export async function runWithObservedChatSave<T>(
 
   if (options.requireHttpSave) {
     throw new Error('聊天保存未完成（等待保存锁超时或未触发落盘请求），修改未写入磁盘');
-  }
-
-  if ((value as unknown) === false) {
-    throw new Error('聊天保存失败，修改未写入磁盘');
   }
 
   return { value, observedHttpSave: false };

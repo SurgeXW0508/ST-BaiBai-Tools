@@ -12,6 +12,7 @@ import { settings } from './state.js';
 import { isStreamingRegexDeferSupported } from './streamingRegexDefer.js';
 import { applyMessageTripleClickEdit } from './tripleClickEdit.js';
 import { applyWelcomeRecentChatDirectOpenOptimization } from './welcomeRecent.js';
+import { hasFetchPipelineSlot, registerFetchPipelineSlot, unregisterFetchPipelineSlot } from '../features/fetchPipeline.js';
 
 function bindChatOptimizationSettings({ saveSettings } = {}) {
     const persistSettings = () => {
@@ -184,66 +185,80 @@ function applyChatOptimizationCompatibilityIndicators(container) {
 }
 
 function applyReduceLoadedFloors() {
+    if (settings.reduceLoadedFloorsEnabled !== true) {
+        disableReduceLoadedFloorsGuard();
+        return;
+    }
+
     const state = installReduceLoadedFloorsGuard();
     if (state) {
         state.isEnabled = () => settings.reduceLoadedFloorsEnabled === true;
         state.enforce = enforceReducedLoadedFloors;
     }
 
-    if (settings.reduceLoadedFloorsEnabled === true) {
-        enforceReducedLoadedFloors({ persist: true });
-    }
+    enforceReducedLoadedFloors({ persist: true });
 }
 
 function installReduceLoadedFloorsGuard() {
-    const existing = globalThis[REDUCE_LOADED_FLOORS_FETCH_KEY];
-    if (existing?.wrappedFetch) {
-        return existing;
-    }
-
-    const originalFetch = globalThis.fetch;
-    if (typeof originalFetch !== 'function') {
+    if (typeof globalThis.fetch !== 'function') {
         return null;
     }
 
-    const state = {
-        originalFetch: originalFetch.bind(globalThis),
-        wrappedFetch: null,
-        inputHandler: null,
-        isEnabled: () => settings.reduceLoadedFloorsEnabled === true,
-        enforce: enforceReducedLoadedFloors,
-    };
+    const existing = globalThis[REDUCE_LOADED_FLOORS_FETCH_KEY];
+    const state = existing && typeof existing === 'object'
+        ? existing
+        : {
+            inputHandler: null,
+            inputListenerAttached: false,
+            isEnabled: () => settings.reduceLoadedFloorsEnabled === true,
+            enforce: enforceReducedLoadedFloors,
+        };
 
-    state.inputHandler = (event) => {
-        const target = event.target;
-        if (!(target instanceof HTMLInputElement)
-            || !REDUCE_LOADED_FLOORS_INPUT_IDS.has(target.id)
-            || !state.isEnabled()
-            || target.value.trim() === '') {
-            return;
-        }
+    if (!state.inputHandler) {
+        state.inputHandler = (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLInputElement)
+                || !REDUCE_LOADED_FLOORS_INPUT_IDS.has(target.id)
+                || !state.isEnabled()
+                || target.value.trim() === '') {
+                return;
+            }
 
-        state.enforce({
-            candidateValue: target.value,
-            persist: true,
+            state.enforce({
+                candidateValue: target.value,
+                persist: true,
+            });
+        };
+    }
+
+    if (!state.inputListenerAttached && typeof document?.addEventListener === 'function') {
+        document.addEventListener('input', state.inputHandler);
+        state.inputListenerAttached = true;
+    }
+
+    if (!hasFetchPipelineSlot('reduceLoadedFloors')) {
+        registerFetchPipelineSlot('reduceLoadedFloors', async function baiBaiToolkitReduceLoadedFloorsFetch(input, init, nextFetch) {
+            if (state.isEnabled() && isChatLoadRequest(input, init)) {
+                state.enforce({ persist: true });
+            }
+
+            return nextFetch(input, init);
         });
-    };
+    }
 
-    document.addEventListener('input', state.inputHandler);
-
-    state.wrappedFetch = async function baiBaiToolkitReduceLoadedFloorsFetch(input, init) {
-        if (state.isEnabled() && isChatLoadRequest(input, init)) {
-            state.enforce({ persist: true });
-        }
-
-        return state.originalFetch(input, init);
-    };
-
-    state.wrappedFetch[REDUCE_LOADED_FLOORS_FETCH_KEY] = true;
-    state.wrappedFetch.__baiBaiToolkitOriginalFetch = originalFetch;
     globalThis[REDUCE_LOADED_FLOORS_FETCH_KEY] = state;
-    globalThis.fetch = state.wrappedFetch;
     return state;
+}
+
+function disableReduceLoadedFloorsGuard() {
+    const existing = globalThis[REDUCE_LOADED_FLOORS_FETCH_KEY];
+    if (existing?.inputListenerAttached && existing.inputHandler && typeof document?.removeEventListener === 'function') {
+        document.removeEventListener('input', existing.inputHandler);
+        existing.inputListenerAttached = false;
+    }
+    const removed = unregisterFetchPipelineSlot('reduceLoadedFloors');
+    delete globalThis[REDUCE_LOADED_FLOORS_FETCH_KEY];
+    return removed;
 }
 
 function enforceReducedLoadedFloors({
